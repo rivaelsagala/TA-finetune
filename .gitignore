@@ -87,3 +87,5 @@ htmlcov/
 
 # Documentation
 docs/_build/
+# Model
+model/
