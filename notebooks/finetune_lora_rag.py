@@ -154,70 +154,99 @@ print(f"LoRA alpha           : {LORA_ALPHA}")
 print(f"{'='*60}")
 
 # ============================================================================
-# STEP 3: Siapkan Dataset Fine-Tuning (RAFT Format)
+# STEP 3: Siapkan Dataset Fine-Tuning (RAFT Format - JSONL)
 # ============================================================================
 """
 Format Data RAFT (Retrieval Augmented Fine-Tuning):
   Referensi: Zhang et al. (2024) [8] - "RAFT: Adapting Language Model to
   Domain Specific RAG"
 
+  Format file: JSONL (satu JSON object per baris), sesuai dengan implementasi
+  resmi RAFT (github.com/ShishirPatil/gorilla/tree/main/raft).
+
   Setiap sampel berisi:
   - instruction: System prompt + dokumen konteks (1 GOLD + N DISTRACTOR)
-    - GOLD_DOCUMENT = sumber jawaban yang benar (simulasi top-1 retrieval)
-    - DISTRACTOR    = dokumen tidak relevan (simulasi retrieval noise)
+    - Dokumen relevan = sumber jawaban yang benar (simulasi top-1 retrieval)
+    - Distractor     = dokumen tidak relevan (simulasi retrieval noise)
     - Posisi gold diacak (tidak selalu di posisi 1)
-  - input: Pertanyaan user
-  - output: Jawaban yang di-grounding HANYA dari GOLD_DOCUMENT
-  - metadata: Tracking info (gold_doc_id, gold_position, dll)
+  - question: Pertanyaan user
+  - cot_answer: Jawaban dengan Chain-of-Thought (##Reason: ... ##Answer: ...)
+    - Zhang et al. menunjukkan CoT meningkatkan performa +9-15%
+  - answer: Jawaban langsung tanpa CoT
+  - context: List semua dokumen konteks (array)
+  - oracle_context: Dokumen gold saja (string)
+  - metadata: Tracking info (gold_doc_id, gold_position, has_oracle, dll)
+
+  RAFT juga menyertakan (1-P)% data tanpa oracle document untuk memaksa
+  model melakukan memorization domain knowledge.
 
   Tujuan RAFT:
   - Model belajar mengidentifikasi dokumen relevan dari sekumpulan dokumen
   - Model belajar mengabaikan distractor (noise dari retriever)
   - Model menghasilkan jawaban yang faithful ke gold document
+  - CoT reasoning meningkatkan akurasi dan mengurangi halusinasi
 """
 import json
 from datasets import Dataset
 
-DATA_PATH = "../data/training_samples_raft_normal.json"
+DATA_PATH = "../data/raft_dataset_qwen.jsonl"
 
-print("\n[STEP 3] Memuat dataset RAFT...")
+print("\n[STEP 3] Memuat dataset RAFT (JSONL)...")
+raw_data = []
 with open(DATA_PATH, "r", encoding="utf-8") as f:
-    raw_data = json.load(f)
+    for line in f:
+        line = line.strip()
+        if line:
+            raw_data.append(json.loads(line))
 
+# Gunakan cot_answer sebagai output (best practice dari RAFT paper)
+# Zhang et al. (2024): CoT reasoning meningkatkan performa 9-15%
 data = []
 for item in raw_data:
     data.append({
-        "instruction": item["instruction"],  # system prompt + all docs
-        "input": item["input"],              # question
-        "output": item["output"],            # answer from gold doc
+        "instruction": item["instruction"],   # system prompt + all docs
+        "input": item["question"],            # pertanyaan user
+        "output": item["cot_answer"],         # CoT answer (##Reason + ##Answer)
     })
 
 dataset = Dataset.from_list(data)
 print(f"Jumlah sampel training: {len(dataset)}")
 
-# Statistik distractor
+# Statistik dataset
 n_distractors = [item["metadata"]["n_distractors"] for item in raw_data]
-gold_positions = [item["metadata"]["gold_position"] for item in raw_data]
+has_oracle = [item["metadata"]["has_oracle"] for item in raw_data]
+gold_positions = [
+    item["metadata"]["gold_position"]
+    for item in raw_data
+    if item["metadata"].get("gold_position") is not None
+]
 villages = set(item["metadata"]["village_name"] for item in raw_data)
-print(f"  Distractors per sample: {n_distractors[0]} (konsisten)")
-print(f"  Gold positions: {sorted(set(gold_positions))}")
-print(f"  Villages: {villages}")
+n_with_oracle = sum(has_oracle)
+n_without_oracle = len(has_oracle) - n_with_oracle
+
+print(f"  Distractors per sample : {n_distractors[0]} (konsisten)")
+print(f"  Dengan oracle (P%)    : {n_with_oracle} ({100*n_with_oracle/len(raw_data):.1f}%)")
+print(f"  Tanpa oracle (1-P)%   : {n_without_oracle} ({100*n_without_oracle/len(raw_data):.1f}%)")
+print(f"  Gold positions        : {sorted(set(gold_positions))}")
+print(f"  Villages              : {villages}")
 
 # Tampilkan contoh data
 print("\n--- CONTOH DATA TRAINING (RAFT) ---")
 print(f"Instruction (system + docs):\n{dataset[0]['instruction'][:300]}...")
 print(f"\nInput (pertanyaan):\n{dataset[0]['input']}")
-print(f"\nOutput (jawaban dari GOLD):\n{dataset[0]['output'][:200]}...")
+print(f"\nOutput (CoT answer):\n{dataset[0]['output'][:200]}...")
 print("-" * 40)
 
 # ============================================================================
 # STEP 4: Format Data ke Template Chat Llama 3.1 (RAFT)
 # ============================================================================
 """
-RAFT data sudah memiliki struktur yang jelas:
+RAFT data (JSONL) sudah memiliki struktur yang jelas:
   instruction = system prompt + [DOKUMEN 1..N] (gold + distractors)
-  input       = pertanyaan user
-  output      = jawaban dari gold document
+  input       = pertanyaan user (dari field 'question' di JSONL)
+  output      = CoT answer (dari field 'cot_answer' di JSONL)
+    Format: ##Reason: {reasoning} ##Answer: {final_answer}
+    Zhang et al. (2024): CoT reasoning meningkatkan akurasi +9-15%
 
 Template chat Llama 3.1:
   <|begin_of_text|><|start_header_id|>system<|end_header_id|>
@@ -225,12 +254,12 @@ Template chat Llama 3.1:
   <|start_header_id|>user<|end_header_id|>
   {documents + pertanyaan}<|eot_id|>
   <|start_header_id|>assistant<|end_header_id|>
-  {jawaban}<|eot_id|>
+  {CoT jawaban}<|eot_id|>
 
 Kita memisahkan system prompt dari dokumen+question agar model belajar:
   1. System role: "Anda adalah asisten hukum..."
   2. User role: dokumen konteks + pertanyaan
-  3. Assistant role: jawaban yang grounded ke gold document
+  3. Assistant role: CoT answer yang grounded ke dokumen relevan
 """
 EOS_TOKEN = tokenizer.eos_token
 
@@ -319,7 +348,7 @@ from transformers import TrainingArguments
 from unsloth import is_bfloat16_supported
 
 LEARNING_RATE = 2e-4
-NUM_EPOCHS = 8
+NUM_EPOCHS = 18
 WARMUP_STEPS = 5
 BATCH_SIZE = 2
 GRAD_ACCUM_STEPS = 4

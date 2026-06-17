@@ -1,50 +1,54 @@
 """
-LLaMA Service untuk RAG Peraturan Desa
-========================================
+llama_service.py
+================
+Model loading, inference, and helper utilities for the RAG Perdes API.
 
-Model path priority (untuk fine-tuned model):
-  1. notebooks/model_merged_rag_perdes/  (model fine-tuned RAFT terbaru)
-  2. model_merged_rag_perdes/            (alternatif path)
-  3. model_merged_legal/                 (model fine-tuned lama)
+Model resolution order (first found is used):
+  1. notebooks/model_merged_rag_perdes/   (fine-tuned, relative to /workspace)
+  2. model_merged_rag_perdes/             (fine-tuned, relative to BE/)
+  3. /workspace/model/Meta-Llama-3.1-8B-Instruct/  (base model fallback)
 
-Base model (fallback jika tidak ada fine-tuned model):
-  /workspace/model/Meta-Llama-3.1-8B-Instruct/
-
-Endpoint:
-  /api/chat     → model loaded (fine-tuned atau base) + pertanyaan TANPA konteks
-  /api/chat-rag → model loaded (fine-tuned atau base) + pertanyaan DENGAN konteks dokumen
-
-Kedua endpoint menggunakan MODEL YANG SAMA. Perbedaannya hanya di prompt:
-  - chat:     system_prompt + user_question
-  - chat-rag: RAG_system_prompt + dokumen_konteks + user_question
+Uses Unsloth's FastLanguageModel for efficient 4-bit inference (QLoRA style).
 """
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
 import os
-import traceback
+import sys
 import logging
+import traceback
+from typing import Optional
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Priority list untuk model path (resolved absolute paths)
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-_WORKSPACE_DIR = os.path.dirname(_BASE_DIR)  # /workspace
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+# Workspace root is one level above BE/
+WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+# Fine-tuned merged model candidates (checked in order)
 MODEL_PATHS = [
-    os.path.join(_BASE_DIR, "notebooks", "model_merged_rag_perdes"),
-    os.path.join(_WORKSPACE_DIR, "notebooks", "model_merged_rag_perdes"),
-    os.path.join(_BASE_DIR, "model_merged_rag_perdes"),
-    os.path.join(_WORKSPACE_DIR, "model_merged_rag_perdes"),
-    os.path.join(_WORKSPACE_DIR, "model_merged_legal"),
-    os.path.join(_BASE_DIR, "..", "model_merged_legal"),
+    os.path.join(WORKSPACE_ROOT, "notebooks", "model_merged_rag_perdes"),
+    os.path.join(WORKSPACE_ROOT, "model_merged_rag_perdes"),
 ]
 
-# Path ke base model lokal (tokenizer + fallback model)
-BASE_MODEL_NAME = os.path.join(_WORKSPACE_DIR, "model", "Meta-Llama-3.1-8B-Instruct")
+# Base model fallback
+BASE_MODEL_NAME = os.path.join(WORKSPACE_ROOT, "model", "Meta-Llama-3.1-8B-Instruct")
 
-# System prompt untuk RAG (sama seperti yang dipakai saat fine-tuning RAFT)
+# Inference config
+MAX_SEQ_LENGTH = 2048
+DEFAULT_MAX_NEW_TOKENS = 512
+
+# ---------------------------------------------------------------------------
+# Global state (lazy-loaded)
+# ---------------------------------------------------------------------------
+_model = None
+_tokenizer = None
+_loaded_model_path: Optional[str] = None
+_load_error: Optional[str] = None
+
+# ---------------------------------------------------------------------------
+# RAG system prompt (must match what was used during fine-tuning)
+# ---------------------------------------------------------------------------
 RAG_SYSTEM_PROMPT = (
     "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
     "Peraturan Desa (Perdes) di Kabupaten Bandung.\n\n"
@@ -54,192 +58,225 @@ RAG_SYSTEM_PROMPT = (
     "dari GOLD_DOCUMENT untuk menjawab pertanyaan."
 )
 
-_model = None
-_tokenizer = None
-_model_path_used = None
+DEFAULT_SYSTEM_PROMPT = (
+    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
+    "Peraturan Desa (Perdes) di Indonesia. Jawab dengan jelas dan lengkap "
+    "berdasarkan pengetahuan Anda."
+)
 
 
-def _find_model_path():
-    """Cari model path yang tersedia secara lokal."""
-    for path in MODEL_PATHS:
-        resolved = os.path.abspath(path)
-        if os.path.isdir(resolved):
-            logger.info(f"Found model at: {resolved}")
-            return resolved
-    logger.warning("No local model found. Searched paths:")
-    for path in MODEL_PATHS:
-        logger.warning(f"  - {os.path.abspath(path)} (not found)")
-    return None
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-
-def _get_hf_token():
-    """Get HF token dari environment variable atau .env file."""
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
-    if not token:
-        # Coba baca dari .env file di workspace root
-        env_path = os.path.join(_WORKSPACE_DIR, ".env")
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("HF_TOKEN="):
-                        token = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        break
-    return token
-
-
-def load_model():
-    global _model, _tokenizer, _model_path_used
-
-    if _model is not None and _tokenizer is not None:
-        return _model, _tokenizer
-
-    model_path = _find_model_path()
-    hf_token = _get_hf_token()
-
-    if model_path:
-        logger.info(f"Loading fine-tuned model dari: {model_path}")
-        _model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            local_files_only=True,  # Jangan coba download dari HF
-        )
-        # Try tokenizer from fine-tuned model first, fallback to base model
-        tokenizer_path = model_path if os.path.isfile(os.path.join(model_path, "tokenizer_config.json")) else BASE_MODEL_NAME
-        logger.info(f"Loading tokenizer dari: {tokenizer_path}")
-        _tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
-        _model_path_used = model_path
-    else:
-        # Fallback: pakai base model lokal
-        if not os.path.isdir(BASE_MODEL_NAME):
-            raise RuntimeError(
-                f"Tidak ada fine-tuned model dan base model tidak ditemukan di: "
-                f"{BASE_MODEL_NAME}. "
-                f"Pastikan folder model ada atau jalankan fine-tuning terlebih dahulu."
-            )
-
-        logger.info(f"Loading base model dari: {BASE_MODEL_NAME}")
-        _model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL_NAME,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            local_files_only=True,
-        )
-        _tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
-        _model_path_used = BASE_MODEL_NAME
-
-    logger.info(f"Model loaded dari: {_model_path_used}")
-    return _model, _tokenizer
-
-
-def generate_answer(
-    pertanyaan: str,
-    system_prompt: str = None,
-    max_new_tokens: int = 512,
-) -> str:
-    """Generate jawaban tanpa konteks RAG (mode biasa)."""
-    model, tokenizer = load_model()
-
-    if system_prompt is None:
-        system_prompt = (
-            "Kamu adalah asisten hukum yang membantu menjawab pertanyaan "
-            "tentang peraturan desa dengan bahasa yang mudah dipahami."
-        )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": pertanyaan},
-    ]
-
-    input_ids = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-    ).to("cuda")
-
-    output_ids = model.generate(
-        input_ids,
-        max_new_tokens=max_new_tokens,
-        temperature=0.1,
-        do_sample=True,
-        repetition_penalty=1.1,
-    )
-
-    response = tokenizer.decode(
-        output_ids[0][input_ids.shape[1]:],
-        skip_special_tokens=True,
-    )
-
-    return response
-
-
-def generate_answer_rag(
-    pertanyaan: str,
-    dokumen_konteks: str,
-    max_new_tokens: int = 512,
-) -> str:
+def _resolve_model_path() -> str:
     """
-    Generate jawaban dengan konteks RAG (format RAFT).
-
-    Args:
-        pertanyaan: Pertanyaan user
-        dokumen_konteks: Teks dokumen yang di-retrieve (GOLD + DISTRACTOR)
-            Format yang diharapkan sama seperti saat fine-tuning:
-            "=== DOKUMEN KONTEKS ===\n[DOKUMEN 1] ...\n=== AKHIR DOKUMEN KONTEKS ==="
-        max_new_tokens: Maksimum token yang di-generate
-
-    Returns:
-        Jawaban model yang di-grounding ke dokumen konteks
+    Walk MODEL_PATHS in order; return the first directory that exists.
+    Falls back to BASE_MODEL_NAME if none found.
     """
-    model, tokenizer = load_model()
-
-    # Format: system prompt + dokumen konteks (sama seperti training RAFT)
-    user_content = f"{dokumen_konteks}\n\n{pertanyaan}"
-
-    messages = [
-        {"role": "system", "content": RAG_SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-
-    input_ids = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-    ).to("cuda")
-
-    output_ids = model.generate(
-        input_ids,
-        max_new_tokens=max_new_tokens,
-        temperature=0.1,
-        do_sample=True,
-        repetition_penalty=1.1,
+    for path in MODEL_PATHS:
+        if os.path.isdir(path):
+            return path
+    if os.path.isdir(BASE_MODEL_NAME):
+        return BASE_MODEL_NAME
+    raise FileNotFoundError(
+        f"No model directory found. Checked:\n"
+        + "\n".join(f"  - {p}" for p in MODEL_PATHS)
+        + f"\n  - {BASE_MODEL_NAME} (base fallback)"
     )
-
-    response = tokenizer.decode(
-        output_ids[0][input_ids.shape[1]:],
-        skip_special_tokens=True,
-    )
-
-    return response
-
-
-def get_model_info() -> dict:
-    """Return info tentang model yang sedang dipakai."""
-    if _model is None:
-        return {"loaded": False, "model_path": None}
-
-    return {
-        "loaded": True,
-        "model_path": _model_path_used,
-        "device": str(next(_model.parameters()).device),
-        "dtype": str(next(_model.parameters()).dtype),
-    }
 
 
 def get_error_detail(e: Exception) -> str:
-    """Return full error detail termasuk traceback untuk debugging."""
-    tb = traceback.format_exc()
-    return f"{type(e).__name__}: {str(e) or '(no message)'}\n\nTraceback:\n{tb}"
+    """Return full traceback string for logging."""
+    return "".join(traceback.format_exception(type(e), e, e.__traceback__))
+
+
+def get_model_info() -> dict:
+    """Return metadata about the currently loaded model."""
+    return {
+        "loaded": _model is not None,
+        "model_path": _loaded_model_path,
+        "max_seq_length": MAX_SEQ_LENGTH,
+        "load_error": _load_error,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
+def load_model(model_path: Optional[str] = None) -> None:
+    """
+    Load the model and tokenizer into global state using Unsloth.
+
+    If `model_path` is None, resolves automatically via `_resolve_model_path()`.
+    Calling this when a model is already loaded is a no-op (unless path differs).
+    """
+    global _model, _tokenizer, _loaded_model_path, _load_error
+
+    resolved_path = model_path or _resolve_model_path()
+
+    # Skip if already loaded with the same path
+    if _model is not None and _loaded_model_path == resolved_path:
+        logger.info(f"Model already loaded from: {resolved_path}")
+        return
+
+    _load_error = None
+    logger.info(f"Loading model from: {resolved_path}")
+
+    try:
+        from unsloth import FastLanguageModel
+
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=resolved_path,
+            max_seq_length=MAX_SEQ_LENGTH,
+            dtype=None,          # auto-detect Float16 / BFloat16
+            load_in_4bit=True,   # QLoRA 4-bit inference
+            device_map="auto",
+        )
+
+        # Switch to inference mode (disables training-only ops)
+        FastLanguageModel.for_inference(model)
+
+        _model = model
+        _tokenizer = tokenizer
+        _loaded_model_path = resolved_path
+
+        logger.info(f"Model loaded successfully: {resolved_path}")
+
+    except Exception as e:
+        _load_error = f"{type(e).__name__}: {str(e) or '(no message)'}"
+        logger.error(f"Failed to load model:\n{get_error_detail(e)}")
+        raise
+
+
+def _ensure_model_loaded() -> None:
+    """Lazy-load model on first call if not already in memory."""
+    if _model is None:
+        load_model()
+
+
+# ---------------------------------------------------------------------------
+# Prompt formatting helpers
+# ---------------------------------------------------------------------------
+
+def _extract_system_and_docs(instruction_text: str) -> tuple:
+    """
+    Split a RAFT instruction into (system_prompt, docs_section).
+
+    The boundary marker is '=== DOKUMEN KONTEKS ==='.
+    If the marker is absent, returns ("", full_instruction).
+    """
+    marker = "=== DOKUMEN KONTEKS ==="
+    idx = instruction_text.find(marker)
+    if idx >= 0:
+        system_prompt = instruction_text[:idx].strip()
+        docs_section = instruction_text[idx:].strip()
+    else:
+        system_prompt = ""
+        docs_section = instruction_text.strip()
+    return system_prompt, docs_section
+
+
+def _build_messages_chat(message: str, system_prompt: Optional[str] = None) -> list:
+    """Build chat messages for plain chat (no RAG context)."""
+    sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+    return [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": message},
+    ]
+
+
+def _build_messages_rag(message: str, konteks: str) -> list:
+    """
+    Build chat messages for RAG mode.
+
+    `konteks` is the full document block including:
+      === DOKUMEN KONTEKS ===
+      [DOKUMEN 1] [GOLD_DOCUMENT] ...
+      ---
+      [DOKUMEN 2] [DISTRACTOR] ...
+      === AKHIR DOKUMEN KONTEKS ===
+    """
+    return [
+        {"role": "system", "content": RAG_SYSTEM_PROMPT},
+        {"role": "user", "content": f"{konteks}\n\n{message}"},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
+
+def _generate(messages: list, max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS) -> str:
+    """
+    Run inference given a list of chat messages.
+
+    Returns the decoded assistant response string.
+    """
+    _ensure_model_loaded()
+
+    eos_token = _tokenizer.eos_token
+
+    # Apply the Llama 3.1 chat template
+    input_ids = _tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to("cuda")
+
+    output_ids = _model.generate(
+        input_ids,
+        max_new_tokens=max_new_tokens,
+        temperature=0.1,
+        do_sample=True,
+        top_p=0.9,
+        repetition_penalty=1.1,
+    )
+
+    # Decode only the generated portion (exclude the prompt tokens)
+    generated_tokens = output_ids[0][input_ids.shape[1]:]
+    response = _tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+    return response.strip()
+
+
+def generate_answer(
+    message: str,
+    system_prompt: Optional[str] = None,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+) -> str:
+    """
+    Generate an answer without RAG context (plain chat).
+
+    Args:
+        message:        User's question.
+        system_prompt:  Optional system prompt override.
+        max_new_tokens: Maximum tokens to generate.
+
+    Returns:
+        Generated answer string.
+    """
+    messages = _build_messages_chat(message, system_prompt)
+    return _generate(messages, max_new_tokens)
+
+
+def generate_answer_rag(
+    message: str,
+    konteks: str,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+) -> str:
+    """
+    Generate an answer with RAG context (fine-tuned RAFT model).
+
+    Args:
+        message:        User's question.
+        konteks:        Document context block (GOLD + DISTRACTOR docs).
+        max_new_tokens: Maximum tokens to generate.
+
+    Returns:
+        Generated answer string grounded in the provided context.
+    """
+    messages = _build_messages_rag(message, konteks)
+    return _generate(messages, max_new_tokens)
