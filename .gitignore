@@ -65,11 +65,11 @@ unsloth_compiled_cache/
 # Data Files (TERLALU BESAR untuk GitHub)
 # =============================================================================
 # Raw peraturan desa JSON files (bisa ratusan MB total)
-data/*.json
-data/*.jsonl
+# data/*.json
+# data/*.jsonl
 
 # Kecuali file kecil yang diperlukan untuk testing
-!data/data.jsonl
+# !data/data.jsonl
 
 # =============================================================================
 # Jupyter Notebook

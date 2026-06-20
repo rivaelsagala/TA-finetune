@@ -1,64 +1,34 @@
 """
 =============================================================================
-Fine-Tuning Llama 3.1 8B Instruct dengan LoRA untuk RAG Peraturan Desa
+Fine-Tuning Llama 3.1 8B Instruct dengan LoRA - RAFT (Retrieval-Augmented Fine-Tuning)
 =============================================================================
 
 Tujuan:
-  Fine-tune model Llama 3.1 8B Instruct menggunakan LoRA (Low-Rank Adaptation)
-  agar model mampu menjawab pertanyaan berdasarkan konteks peraturan desa yang
-  diberikan (RAG-aware). Model yang telah di-fine-tune kemudian dibandingkan
-  dengan RAG vanilla (base model + RAG tanpa fine-tune).
+  Fine-tune model Llama 3.1 8B Instruct menggunakan LoRA dengan pendekatan
+  RAFT (Retrieval-Augmented Fine-Tuning) pada dataset raft_perdes_dataset.jsonl
+  berisi Q&A + dokumen konteks (gold + distractor) dari Peraturan Desa.
+
+  Model hasil fine-tuning ini akan dibandingkan dengan:
+    1. Model base + RAG vanilla (tanpa fine-tune)
+    2. Model Q&A sederhana (fine-tuned tanpa konteks dokumen)
 
 Pendekatan:
+  - RAFT: Model dilatih dengan dokumen konteks (gold + distractor) agar
+    belajar memilih dokumen relevan dan mengabaikan distractor
   - QLoRA: Kuantisasi 4-bit + LoRA untuk efisiensi memori
   - Unsloth: Library untuk mempercepat fine-tuning 2x lebih cepat
-  - Format data: instruction (konteks RAG) + input (pertanyaan) -> output (jawaban)
+  - Format data: instruction + documents -> thought_process + completion
 
 Referensi Jurnal:
-  [1] Hu, E. J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., Wang, L.,
-      & Chen, W. (2022). "LoRA: Low-Rank Adaptation of Large Language Models."
-      In ICLR 2022. https://arxiv.org/abs/2106.09685
-
-  [2] Dettmers, T., Pagnoni, A., Holtzman, A., & Zettlemoyer, L. (2023).
-      "QLoRA: Efficient Finetuning of Quantized Language Models."
-      In NeurIPS 2023. https://arxiv.org/abs/2305.14314
-
-  [3] Lewis, P., Perez, E., Piktus, A., et al. (2020). "Retrieval-Augmented
-      Generation for Knowledge-Intensive NLP Tasks." In NeurIPS 2020.
-      https://arxiv.org/abs/2005.11401
-
-  [4] Gao, Y., Xiong, Y., Gao, X., et al. (2024). "Retrieval-Augmented
-      Generation for Large Language Models: A Survey." arXiv:2312.10997.
-      https://arxiv.org/abs/2312.10997
-
-  [5] Zhang, S., Dong, L., Li, X., et al. (2023). "Instruction Tuning for
-      Large Language Models: A Survey." arXiv:2308.10792.
-      https://arxiv.org/abs/2308.10792
-
-  [6] Shi, F., Chen, X., Misra, K., et al. (2024). "Large Language Models Can
-      Be Easily Distracted by Irrelevant Context." In ICML 2023.
-      https://arxiv.org/abs/2302.00093
-
-  [7] Chen, Z., Steiner, A., & Kumar, A. (2024). "RAG vs Fine-tuning:
-      Pipelines, Tradeoffs, and a Case Study on Agriculture."
-      arXiv:2401.08406. https://arxiv.org/abs/2401.08406
-
-  [8] Zhang, T., Shao, F., Garg, S., et al. (2024). "RAFT: Adapting Language
-      Model to Domain Specific RAG." In Transactions on ML Research.
-      https://arxiv.org/abs/2403.10131
+  [1] Hu, E. J., et al. (2022). "LoRA: Low-Rank Adaptation of Large Language
+      Models." In ICLR 2022. https://arxiv.org/abs/2106.09685
+  [2] Dettmers, T., et al. (2023). "QLoRA: Efficient Finetuning of Quantized
+      Language Models." In NeurIPS 2023. https://arxiv.org/abs/2305.14314
+  [3] Zhang, T., et al. (2024). "RAFT: Adapting Language Model to Domain
+      Specific RAG." In TMLR. https://arxiv.org/abs/2403.10131
 
 =============================================================================
 """
-
-# ============================================================================
-# STEP 0: Instalasi Dependencies
-# ============================================================================
-# Jalankan command berikut sebelum menjalankan script:
-#
-#   pip install torch transformers accelerate peft bitsandbytes datasets trl unsloth pandas
-#
-# Pastikan CUDA driver sudah terinstal dan kompatibel dengan PyTorch.
-# ============================================================================
 
 # ============================================================================
 # STEP 1: Cek Lingkungan (GPU & Library)
@@ -87,21 +57,13 @@ assert torch.cuda.is_available(), "CUDA tidak tersedia! Pastikan GPU terdeteksi.
 # ============================================================================
 # STEP 2: Load Model dengan Unsloth + QLoRA (4-bit)
 # ============================================================================
-"""
-Referensi:
-  - Hu et al. (2022) [1]: LoRA menggunakan low-rank decomposition untuk
-    mengurangi parameter yang perlu dilatih dari ~8B menjadi ~42 juta (0.5%).
-  - Dettmers et al. (2023) [2]: QLoRA mengombinasikan kuantisasi 4-bit NF4
-    dengan LoRA untuk fine-tuning model 65B pada GPU 48GB.
-"""
 from unsloth import FastLanguageModel
 
-MAX_SEQ_LENGTH = 2048  # RAFT samples: ~600-800 tokens instruction + input + output
+MAX_SEQ_LENGTH = 2048
 DTYPE = None            # Auto-detect: Float16/BFloat16
 LOAD_IN_4BIT = True     # QLoRA: kuantisasi 4-bit NF4
 
-# BASE_MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B-Instruct"  # remote HuggingFace
-BASE_MODEL_NAME = "../model/Meta-Llama-3.1-8B-Instruct"  # local path (lebih cepat, tidak perlu download)
+BASE_MODEL_NAME = "../model/Meta-Llama-3.1-8B-Instruct"  # local path
 
 print("\n[STEP 2] Loading model dengan QLoRA (4-bit)...")
 model, tokenizer = FastLanguageModel.from_pretrained(
@@ -110,14 +72,9 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     dtype=DTYPE,
     load_in_4bit=LOAD_IN_4BIT,
     device_map="auto",
-    # token tidak diperlukan jika load dari path lokal
 )
 
 # Konfigurasi LoRA
-# r=16: rank LoRA (Hu et al. menyarankan 8-64, 16 adalah sweet spot)
-# target_modules: semua linear layer (Q, K, V, O, Gate, Up, Down)
-# lora_alpha=16: scaling factor (biasanya = r atau 2*r)
-# lora_dropout=0: dropout 0 untuk performa optimal (Hu et al.)
 LORA_R = 16
 LORA_ALPHA = 16
 LORA_DROPOUT = 0.0
@@ -154,44 +111,36 @@ print(f"LoRA alpha           : {LORA_ALPHA}")
 print(f"{'='*60}")
 
 # ============================================================================
-# STEP 3: Siapkan Dataset Fine-Tuning (RAFT Format - JSONL)
+# STEP 3: Siapkan Dataset RAFT (raft_perdes_dataset.jsonl)
 # ============================================================================
 """
-Format Data RAFT (Retrieval Augmented Fine-Tuning):
-  Referensi: Zhang et al. (2024) [8] - "RAFT: Adapting Language Model to
-  Domain Specific RAG"
+Format data raft_perdes_dataset.jsonl (RAFT format):
+  Setiap baris berisi JSON object dengan field:
+  - instruction: Pertanyaan tentang Peraturan Desa
+  - documents: List dokumen konteks (1 gold + 2 distractor, posisi diacak)
+  - thought_process: Chain-of-Thought reasoning (analisis relevansi dokumen)
+  - completion: Jawaban akhir berdasarkan dokumen yang relevan
 
-  Format file: JSONL (satu JSON object per baris), sesuai dengan implementasi
-  resmi RAFT (github.com/ShishirPatil/gorilla/tree/main/raft).
+  Contoh:
+  {
+    "instruction": "Apa rentang usia bayi?",
+    "documents": ["pasal 1\n\n15. bayi adalah...", "pasal 1\n\n9. pembangunan...", ...],
+    "thought_process": "Langkah analisis: evaluasi setiap dokumen...",
+    "completion": "Rentang usia bayi adalah 0 bulan sampai 11 bulan 28 hari."
+  }
 
-  Setiap sampel berisi:
-  - instruction: System prompt + dokumen konteks (1 GOLD + N DISTRACTOR)
-    - Dokumen relevan = sumber jawaban yang benar (simulasi top-1 retrieval)
-    - Distractor     = dokumen tidak relevan (simulasi retrieval noise)
-    - Posisi gold diacak (tidak selalu di posisi 1)
-  - question: Pertanyaan user
-  - cot_answer: Jawaban dengan Chain-of-Thought (##Reason: ... ##Answer: ...)
-    - Zhang et al. menunjukkan CoT meningkatkan performa +9-15%
-  - answer: Jawaban langsung tanpa CoT
-  - context: List semua dokumen konteks (array)
-  - oracle_context: Dokumen gold saja (string)
-  - metadata: Tracking info (gold_doc_id, gold_position, has_oracle, dll)
-
-  RAFT juga menyertakan (1-P)% data tanpa oracle document untuk memaksa
-  model melakukan memorization domain knowledge.
-
-  Tujuan RAFT:
-  - Model belajar mengidentifikasi dokumen relevan dari sekumpulan dokumen
-  - Model belajar mengabaikan distractor (noise dari retriever)
-  - Model menghasilkan jawaban yang faithful ke gold document
-  - CoT reasoning meningkatkan akurasi dan mengurangi halusinasi
+  Dataset ini berisi Q&A dari Peraturan Desa dengan format RAFT, di mana
+  model dilatih untuk:
+  1. Menerima pertanyaan + dokumen konteks (gold + distractor)
+  2. Menganalisis relevansi setiap dokumen (Chain-of-Thought)
+  3. Menghasilkan jawaban berdasarkan dokumen yang relevan saja
 """
 import json
 from datasets import Dataset
 
-DATA_PATH = "../data/raft_dataset_qwen.jsonl"
+DATA_PATH = "../data/raft_perdes_dataset.jsonl"
 
-print("\n[STEP 3] Memuat dataset RAFT (JSONL)...")
+print("\n[STEP 3] Memuat dataset RAFT (raft_perdes_dataset.jsonl)...")
 raw_data = []
 with open(DATA_PATH, "r", encoding="utf-8") as f:
     for line in f:
@@ -199,126 +148,105 @@ with open(DATA_PATH, "r", encoding="utf-8") as f:
         if line:
             raw_data.append(json.loads(line))
 
-# Gunakan cot_answer sebagai output (best practice dari RAFT paper)
-# Zhang et al. (2024): CoT reasoning meningkatkan performa 9-15%
+# Format RAFT: instruction + documents -> thought_process + completion
 data = []
 for item in raw_data:
     data.append({
-        "instruction": item["instruction"],   # system prompt + all docs
-        "input": item["question"],            # pertanyaan user
-        "output": item["cot_answer"],         # CoT answer (##Reason + ##Answer)
+        "instruction": item["instruction"],
+        "documents": item["documents"],
+        "thought_process": item["thought_process"],
+        "completion": item["completion"],
     })
 
 dataset = Dataset.from_list(data)
 print(f"Jumlah sampel training: {len(dataset)}")
 
 # Statistik dataset
-n_distractors = [item["metadata"]["n_distractors"] for item in raw_data]
-has_oracle = [item["metadata"]["has_oracle"] for item in raw_data]
-gold_positions = [
-    item["metadata"]["gold_position"]
-    for item in raw_data
-    if item["metadata"].get("gold_position") is not None
-]
-villages = set(item["metadata"]["village_name"] for item in raw_data)
-n_with_oracle = sum(has_oracle)
-n_without_oracle = len(has_oracle) - n_with_oracle
+avg_q_len = sum(len(d["instruction"]) for d in data) / len(data)
+avg_a_len = sum(len(d["completion"]) for d in data) / len(data)
+avg_doc_count = sum(len(d["documents"]) for d in data) / len(data)
 
-print(f"  Distractors per sample : {n_distractors[0]} (konsisten)")
-print(f"  Dengan oracle (P%)    : {n_with_oracle} ({100*n_with_oracle/len(raw_data):.1f}%)")
-print(f"  Tanpa oracle (1-P)%   : {n_without_oracle} ({100*n_without_oracle/len(raw_data):.1f}%)")
-print(f"  Gold positions        : {sorted(set(gold_positions))}")
-print(f"  Villages              : {villages}")
+print(f"  Rata-rata panjang pertanyaan : {avg_q_len:.0f} karakter")
+print(f"  Rata-rata panjang jawaban    : {avg_a_len:.0f} karakter")
+print(f"  Rata-rata jumlah dokumen     : {avg_doc_count:.1f} per sampel")
 
 # Tampilkan contoh data
 print("\n--- CONTOH DATA TRAINING (RAFT) ---")
-print(f"Instruction (system + docs):\n{dataset[0]['instruction'][:300]}...")
-print(f"\nInput (pertanyaan):\n{dataset[0]['input']}")
-print(f"\nOutput (CoT answer):\n{dataset[0]['output'][:200]}...")
+for i in range(min(3, len(dataset))):
+    print(f"\n  [{i+1}] Pertanyaan : {dataset[i]['instruction'][:100]}...")
+    print(f"      # Dokumen   : {len(dataset[i]['documents'])}")
+    print(f"      CoT         : {dataset[i]['thought_process'][:80]}...")
+    print(f"      Jawaban     : {dataset[i]['completion'][:80]}...")
 print("-" * 40)
 
 # ============================================================================
-# STEP 4: Format Data ke Template Chat Llama 3.1 (RAFT)
+# STEP 4: Format Data ke Template Chat Llama 3.1 (RAFT Format)
 # ============================================================================
 """
-RAFT data (JSONL) sudah memiliki struktur yang jelas:
-  instruction = system prompt + [DOKUMEN 1..N] (gold + distractors)
-  input       = pertanyaan user (dari field 'question' di JSONL)
-  output      = CoT answer (dari field 'cot_answer' di JSONL)
-    Format: ##Reason: {reasoning} ##Answer: {final_answer}
-    Zhang et al. (2024): CoT reasoning meningkatkan akurasi +9-15%
-
-Template chat Llama 3.1:
+Template chat Llama 3.1 untuk RAFT:
   <|begin_of_text|><|start_header_id|>system<|end_header_id|>
-  {system_prompt_part}<|eot_id|>
+  {system_prompt}<|eot_id|>
   <|start_header_id|>user<|end_header_id|>
-  {documents + pertanyaan}<|eot_id|>
-  <|start_header_id|>assistant<|end_header_id|>
-  {CoT jawaban}<|eot_id|>
+  {pertanyaan}
 
-Kita memisahkan system prompt dari dokumen+question agar model belajar:
-  1. System role: "Anda adalah asisten hukum..."
-  2. User role: dokumen konteks + pertanyaan
-  3. Assistant role: CoT answer yang grounded ke dokumen relevan
+  Dokumen 1:
+  {dokumen_1}
+
+  Dokumen 2:
+  {dokumen_2}
+
+  Dokumen 3:
+  {dokumen_3}<|eot_id|>
+  <|start_header_id|>assistant<|end_header_id|>
+  {thought_process}
+
+  {completion}<|eot_id|>
+
+System prompt dibuat konsisten dengan yang dipakai saat inference di BE/
+agar model terbiasa dengan instruksi yang sama. System prompt TIDAK
+menyebutkan GOLD/DISTRACTOR, hanya menyatakan "tidak semua dokumen relevan".
 """
 EOS_TOKEN = tokenizer.eos_token
 
-
-def extract_system_and_docs(instruction_text: str) -> tuple:
-    """
-    Pisahkan system prompt dari dokumen konteks.
-
-    Input:
-      "Anda adalah asisten hukum...\\n\\n...=== DOKUMEN KONTEKS ===\\n..."
-
-    Output:
-      system_prompt = "Anda adalah asisten hukum..."
-      docs_section  = "=== DOKUMEN KONTEKS ===\\n..."
-    """
-    # Cari batas antara system prompt dan dokumen
-    marker = "=== DOKUMEN KONTEKS ==="
-    idx = instruction_text.find(marker)
-
-    if idx >= 0:
-        system_prompt = instruction_text[:idx].strip()
-        docs_section = instruction_text[idx:].strip()
-    else:
-        # Fallback: gunakan seluruh instruction sebagai user content
-        system_prompt = ""
-        docs_section = instruction_text.strip()
-
-    return system_prompt, docs_section
+# System prompt - SAMA persis dengan RAFT_SYSTEM_PROMPT di BE/llama_service.py
+# agar format inference konsisten antara training dan production
+# PENTING: Tidak menyebutkan GOLD/DISTRACTOR label, sesuai format RAFT inference
+SYSTEM_PROMPT = (
+    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
+    "Peraturan Desa (Perdes) di Indonesia. Jawab pertanyaan berdasarkan "
+    "dokumen-dokumen yang diberikan. Tidak semua dokumen relevan dengan "
+    "pertanyaan, jadi pilihlah informasi dari dokumen yang paling sesuai."
+)
 
 
 def formatting_prompts_func(examples):
     instructions = examples["instruction"]
-    inputs = examples["input"]
-    outputs = examples["output"]
+    documents_list = examples["documents"]
+    thought_processes = examples["thought_process"]
+    completions = examples["completion"]
     texts = []
 
-    for instr, inp, out in zip(instructions, inputs, outputs):
-        system_prompt, docs_section = extract_system_and_docs(instr)
+    for instr, docs, cot, comp in zip(instructions, documents_list, thought_processes, completions):
+        # Format dokumen sebagai numbered list
+        docs_text = ""
+        for idx, doc in enumerate(docs, 1):
+            docs_text += f"\n\nDokumen {idx}:\n{doc}"
 
-        if system_prompt:
-            # Format dengan system + user + assistant
-            text = (
-                f"<|begin_of_text|>"
-                f"<|start_header_id|>system<|end_header_id|>\n\n"
-                f"{system_prompt}<|eot_id|>"
-                f"<|start_header_id|>user<|end_header_id|>\n\n"
-                f"{docs_section}\n\n{inp}<|eot_id|>"
-                f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-                f"{out}{EOS_TOKEN}"
-            )
-        else:
-            # Fallback: semua di user turn
-            text = (
-                f"<|begin_of_text|>"
-                f"<|start_header_id|>user<|end_header_id|>\n\n"
-                f"{instr}\n\n{inp}<|eot_id|>"
-                f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-                f"{out}{EOS_TOKEN}"
-            )
+        # User message: pertanyaan + dokumen konteks
+        user_message = f"{instr}{docs_text}"
+
+        # Assistant response: Chain-of-Thought + jawaban akhir
+        assistant_response = f"{cot}\n\n{comp}"
+
+        text = (
+            f"<|begin_of_text|>"
+            f"<|start_header_id|>system<|end_header_id|>\n\n"
+            f"{SYSTEM_PROMPT}<|eot_id|>"
+            f"<|start_header_id|>user<|end_header_id|>\n\n"
+            f"{user_message}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+            f"{assistant_response}{EOS_TOKEN}"
+        )
         texts.append(text)
 
     return {"text": texts}
@@ -326,19 +254,17 @@ def formatting_prompts_func(examples):
 
 dataset = dataset.map(formatting_prompts_func, batched=True)
 
-print("\n[STEP 4] Contoh data setelah formatting (RAFT):")
-print(dataset[0]["text"][:600])
+print("\n[STEP 4] Contoh data setelah formatting:")
+print(dataset[0]["text"][:800])
 
 # ============================================================================
 # STEP 5: Konfigurasi & Jalankan Training
 # ============================================================================
 """
-Hyperparameter yang digunakan (berdasarkan rekomendasi jurnal):
-
+Hyperparameter:
   - learning_rate = 2e-4: Standar untuk LoRA (Hu et al. [1])
   - batch_size = 2, grad_accum = 4: Effective batch size = 8
-  - max_steps: Disesuaikan dengan ukuran dataset
-  - epochs: 6-8 epochs untuk dataset kecil (Chen et al. [7])
+  - epochs: 15-20 epochs untuk dataset kecil (179 sampel)
   - optimizer: adamw_8bit untuk efisiensi memori (Dettmers et al. [2])
   - lr_scheduler: Linear decay (standar untuk LoRA)
   - warmup_steps: 5 steps untuk stabilitas awal
@@ -348,7 +274,7 @@ from transformers import TrainingArguments
 from unsloth import is_bfloat16_supported
 
 LEARNING_RATE = 2e-4
-NUM_EPOCHS = 18
+NUM_EPOCHS = 20
 WARMUP_STEPS = 5
 BATCH_SIZE = 2
 GRAD_ACCUM_STEPS = 4
@@ -358,13 +284,15 @@ steps_per_epoch = (len(dataset) // (BATCH_SIZE * GRAD_ACCUM_STEPS)) + 1
 MAX_STEPS = steps_per_epoch * NUM_EPOCHS
 
 print(f"\n[STEP 5] Konfigurasi Training:")
-print(f"  Learning rate     : {LEARNING_RATE}")
-print(f"  Num epochs        : {NUM_EPOCHS}")
-print(f"  Batch size        : {BATCH_SIZE}")
-print(f"  Grad accum steps  : {GRAD_ACCUM_STEPS}")
-print(f"  Effective batch   : {BATCH_SIZE * GRAD_ACCUM_STEPS}")
-print(f"  Max steps         : {MAX_STEPS}")
-print(f"  BF16 supported    : {is_bfloat16_supported()}")
+print(f"  Dataset size       : {len(dataset)} sampel")
+print(f"  Learning rate      : {LEARNING_RATE}")
+print(f"  Num epochs         : {NUM_EPOCHS}")
+print(f"  Batch size         : {BATCH_SIZE}")
+print(f"  Grad accum steps   : {GRAD_ACCUM_STEPS}")
+print(f"  Effective batch    : {BATCH_SIZE * GRAD_ACCUM_STEPS}")
+print(f"  Steps per epoch    : {steps_per_epoch}")
+print(f"  Max steps          : {MAX_STEPS}")
+print(f"  BF16 supported     : {is_bfloat16_supported()}")
 
 trainer = SFTTrainer(
     model=model,
@@ -387,9 +315,9 @@ trainer = SFTTrainer(
         weight_decay=0.01,
         lr_scheduler_type="linear",
         seed=3407,
-        output_dir="outputs_lora_rag",
+        output_dir="outputs_lora",
         report_to="none",
-        save_strategy="no",  # Hindari pickling error pada SFTConfig; simpan manual di STEP 6
+        save_strategy="no",  # Hindari pickling error; simpan manual di STEP 6
     ),
 )
 
@@ -409,8 +337,8 @@ print(f"{'='*60}")
 # ============================================================================
 # STEP 6: Simpan Adaptor LoRA & Merge ke Base Model
 # ============================================================================
-LORA_ADAPTER_DIR = "lora_adapter_rag_perdes"
-MERGED_MODEL_DIR = "model_merged_rag_perdes"
+LORA_ADAPTER_DIR = "lora_adapter_raft_perdes"
+MERGED_MODEL_DIR = "model_merged_raft_perdes"
 
 print("\n[STEP 6] Menyimpan adaptor LoRA...")
 model.save_pretrained(LORA_ADAPTER_DIR)
@@ -422,80 +350,46 @@ model.save_pretrained_merged(MERGED_MODEL_DIR, tokenizer, save_method="merged_16
 print(f"  Model merged disimpan di: {MERGED_MODEL_DIR}")
 
 # ============================================================================
-# STEP 7: Uji Inferensi Model Fine-Tuned
+# STEP 7: Uji Inferensi Model Fine-Tuned (RAFT Format)
 # ============================================================================
 from unsloth import FastLanguageModel as FLM
 
-print("\n[STEP 7] Menguji model fine-tuned...")
+print("\n[STEP 7] Menguji model fine-tuned dengan format RAFT...")
 FLM.for_inference(model)
 
-# Contoh pertanyaan dengan konteks RAFT (GOLD + DISTRACTOR)
-SYSTEM_PROMPT = (
-    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
-    "Peraturan Desa (Perdes) di Kabupaten Bandung.\n\n"
-    "Di bawah ini terdapat beberapa dokumen peraturan. Satu dokumen adalah "
-    "GOLD_DOCUMENT (sumber jawaban yang benar), sisanya adalah DISTRACTOR "
-    "(dokumen tidak relevan yang sengaja disertakan). Gunakan HANYA informasi "
-    "dari GOLD_DOCUMENT untuk menjawab pertanyaan."
-)
-
+# Test cases dengan dokumen konteks (simulasi RAG retrieval)
+# Format: pertanyaan + dokumen konteks (gold + distractor)
 test_cases = [
     {
-        "instruction": (
-            f"{SYSTEM_PROMPT}\n\n"
-            "=== DOKUMEN KONTEKS ===\n\n"
-            "[DOKUMEN 1] [GOLD_DOCUMENT]\n"
-            "Judul  : Peraturan Desa Biru No. 07 Tahun 2015 - Kibbla\n"
-            "Bagian : pasal 1\n"
-            "Desa   : Biru\n\n"
-            "pasal 1\n\n"
-            "15. bayi adalah anak usia 0 bulan sampai dengan 11 bulan 28 hari\n\n"
-            "---\n\n"
-            "[DOKUMEN 2] [DISTRACTOR]\n"
-            "Judul  : Peraturan Desa Loa, No. 114 Tahun 2014\n"
-            "Bagian : pasal 6\n"
-            "Desa   : Loa\n\n"
-            "pasal 6\n\n"
-            "1. air bersih berskala desa;\n\n"
-            "=== AKHIR DOKUMEN KONTEKS ==="
-        ),
-        "input": "Apa yang diatur dalam Peraturan Desa Biru No. 07 Tahun 2015 mengenai pasal 1?",
+        "question": "Apa yang dimaksud dengan keputusan kepala desa menurut Peraturan Desa Biru No. 07 Tahun 2015?",
+        "documents": [
+            "pasal 12\n\n(3) jumlah tim sebagaimana dimaksud pada ayat (1), paling sedikit 7 (tujuh) dan paling banyak 11 (sebelas) orang.",
+            "pasal 32\n\n(5) dalam hal pembahasan dalam musyawarah desa sebagaimana dimaksud pada ayat (4) tidak\nmenyepakati teknis pelaksanaan program sektor dan/atau program daerah, kepala desa dapat\nmengajukan keberatan atas bagian dari teknis pelaksanaan yang tidak disepakati, disertai dasar\npertimbangan keberatan dimaksud.",
+            "pasal 1\n\n4. keputusan kepala desa adalah keputusan yang dibuat oleh kepala desa\n\nsebagai tindak lanjut peraturan desa atau ketentuan lain yang bersifat",
+        ],
     },
     {
-        "instruction": (
-            f"{SYSTEM_PROMPT}\n\n"
-            "=== DOKUMEN KONTEKS ===\n\n"
-            "[DOKUMEN 1] [DISTRACTOR]\n"
-            "Judul  : Peraturan Desa Biru No. 07 Tahun 2015 - Kibbla\n"
-            "Bagian : pasal 2\n"
-            "Desa   : Biru\n\n"
-            "pasal 2\n\n"
-            "kesehatan ibu, bayi baru lahir, bayi dan anak balita berasaskan nilai ilmiah.\n\n"
-            "---\n\n"
-            "[DOKUMEN 2] [GOLD_DOCUMENT]\n"
-            "Judul  : Peraturan Desa Loa, No. 114 Tahun 2014\n"
-            "Bagian : pasal 1\n"
-            "Desa   : Loa\n\n"
-            "pasal 1\n\n"
-            "24. lembaga adat desa adalah lembaga yang menyelenggarakan fungsi adat istiadat dan "
-            "menjadi bagian dari susunan asli desa yang tumbuh dan berkembang atas prakarsa masyarakat desa.\n\n"
-            "=== AKHIR DOKUMEN KONTEKS ==="
-        ),
-        "input": "Menurut Peraturan Desa Loa No. 114 Tahun 2014, apa yang dimaksud lembaga adat desa?",
+        "question": "Siapa saja yang mengikuti musyawarah perencanaan pembangunan desa?",
+        "documents": [
+            "pasal 8\n\n2. untuk melaksanakan tugas sebagaimana dimaksud dalam ayat 1 pasal 8 ini ketua tim\n\nkibbla mempunyai fungsi : 1. memimpin dan mengendalikan seluruh kegiatan tim kibbla.",
+            "pasal 12\n\n4. fungsi khusus kordinator bidang;\n1. kordinator bidang data dan informasi;",
+            "pasal 25\n\n(2) musyawarah perencanaan pembangunan desa sebagaimana dimaksud pada ayat (1) diikuti oleh\npemerintah desa, badan permusyawaratan desa, dan unsur masyarakat.",
+        ],
     },
 ]
 
-for i, tc in enumerate(test_cases):
-    sys_prompt, docs = extract_system_and_docs(tc["instruction"])
-    user_content = f"{docs}\n\n{tc['input']}"
+for i, test_case in enumerate(test_cases):
+    # Format dokumen sebagai numbered list (sama dengan training)
+    docs_text = ""
+    for idx, doc in enumerate(test_case["documents"], 1):
+        docs_text += f"\n\nDokumen {idx}:\n{doc}"
 
-    if sys_prompt:
-        messages = [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_content},
-        ]
-    else:
-        messages = [{"role": "user", "content": f"{tc['instruction']}\n\n{tc['input']}"}]
+    user_message = f"{test_case['question']}{docs_text}"
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
 
     input_ids = tokenizer.apply_chat_template(
         messages,
@@ -509,6 +403,7 @@ for i, tc in enumerate(test_cases):
         max_new_tokens=512,
         temperature=0.1,
         do_sample=True,
+        top_p=0.9,
         repetition_penalty=1.1,
     )
 
@@ -518,11 +413,18 @@ for i, tc in enumerate(test_cases):
     )
 
     print(f"\n--- Test {i+1} ---")
-    print(f"Pertanyaan  : {tc['input']}")
+    print(f"Pertanyaan  : {test_case['question']}")
+    print(f"# Dokumen   : {len(test_case['documents'])}")
     print(f"Jawaban     : {response}")
 
 print("\n" + "=" * 60)
-print("FINE-TUNING SELESAI!")
+print("FINE-TUNING RAFT SELESAI!")
 print(f"  LoRA adapter : {LORA_ADAPTER_DIR}")
 print(f"  Merged model : {MERGED_MODEL_DIR}")
+print(f"{'='*60}")
+print()
+print("PERBANDINGAN MODEL:")
+print(f"  1. Base model + RAG    : Meta-Llama-3.1-8B-Instruct (tanpa fine-tune)")
+print(f"  2. Model RAFT (baru)   : {MERGED_MODEL_DIR}")
+print(f"  3. Model Q&A sederhana : model_merged_perdes (dari finetune_lora_new.py)")
 print("=" * 60)

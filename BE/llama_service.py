@@ -1,224 +1,192 @@
 """
 llama_service.py
 ================
-Model loading, inference, and helper utilities for the RAG Perdes API.
+Service layer untuk model LLaMA 3.1 8B Instruct.
 
-Model resolution order (first found is used):
-  1. notebooks/model_merged_rag_perdes/   (fine-tuned, relative to /workspace)
-  2. model_merged_rag_perdes/             (fine-tuned, relative to BE/)
-  3. /workspace/model/Meta-Llama-3.1-8B-Instruct/  (base model fallback)
+Menangani:
+  - Load model (base / fine-tuned RAFT / fine-tuned Q&A)
+  - Generate jawaban tanpa konteks (plain chat)
+  - Generate jawaban dengan konteks RAG (chat-rag, format RAFT)
+  - Info model yang sedang aktif
 
-Uses Unsloth's FastLanguageModel for efficient 4-bit inference (QLoRA style).
+PENTING: System prompt saat inference HARUS SAMA PERSIS dengan yang dipakai
+saat training (fine-tuning). Mismatch akan menyebabkan model bingung dan
+menghasilkan jawaban yang tidak relevan.
 """
 
 import os
-import sys
+import re
 import logging
 import traceback
+import torch
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-# Workspace root is one level above BE/
-WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-# Fine-tuned merged model candidates (checked in order)
-MODEL_PATHS = [
-    os.path.join(WORKSPACE_ROOT, "notebooks", "model_merged_rag_perdes"),
-    os.path.join(WORKSPACE_ROOT, "model_merged_rag_perdes"),
-]
-
-# Base model fallback
-BASE_MODEL_NAME = os.path.join(WORKSPACE_ROOT, "model", "Meta-Llama-3.1-8B-Instruct")
-
-# Inference config
-MAX_SEQ_LENGTH = 2048
-DEFAULT_MAX_NEW_TOKENS = 512
-
-# ---------------------------------------------------------------------------
-# Global state (lazy-loaded)
-# ---------------------------------------------------------------------------
-_model = None
-_tokenizer = None
-_loaded_model_path: Optional[str] = None
-_load_error: Optional[str] = None
-
-# ---------------------------------------------------------------------------
-# RAG system prompt (must match what was used during fine-tuning)
-# ---------------------------------------------------------------------------
-RAG_SYSTEM_PROMPT = (
-    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
-    "Peraturan Desa (Perdes) di Kabupaten Bandung.\n\n"
-    "Di bawah ini terdapat beberapa dokumen peraturan. Satu dokumen adalah "
-    "GOLD_DOCUMENT (sumber jawaban yang benar), sisanya adalah DISTRACTOR "
-    "(dokumen tidak relevan yang sengaja disertakan). Gunakan HANYA informasi "
-    "dari GOLD_DOCUMENT untuk menjawab pertanyaan."
+# ============================================================================
+# Konfigurasi Path Model
+# ============================================================================
+BASE_MODEL_NAME = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "model", "Meta-Llama-3.1-8B-Instruct")
 )
 
-DEFAULT_SYSTEM_PROMPT = (
+# Path model fine-tuned (relatif terhadap file ini)
+_NOTEBOOKS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "notebooks"))
+
+MODEL_PATHS = [
+    os.path.join(_NOTEBOOKS_DIR, "model_merged_raft_perdes"),   # RAFT fine-tuned
+    os.path.join(_NOTEBOOKS_DIR, "model_merged_perdes"),         # Q&A fine-tuned
+]
+
+# ============================================================================
+# System Prompts (HARUS SAMA PERSIS dengan training)
+# ============================================================================
+
+# System prompt untuk model RAFT (fine-tuned dengan dokumen konteks)
+# Digunakan di /api/chat-rag
+RAFT_SYSTEM_PROMPT = (
+    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
+    "Peraturan Desa (Perdes) di Indonesia. Jawab pertanyaan berdasarkan "
+    "dokumen-dokumen yang diberikan. Tidak semua dokumen relevan dengan "
+    "pertanyaan, jadi pilihlah informasi dari dokumen yang paling sesuai."
+)
+
+# System prompt untuk model base / Q&A (tanpa dokumen konteks)
+# Digunakan di /api/chat
+PLAIN_SYSTEM_PROMPT = (
     "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
     "Peraturan Desa (Perdes) di Indonesia. Jawab dengan jelas dan lengkap "
     "berdasarkan pengetahuan Anda."
 )
 
+# ============================================================================
+# Global State
+# ============================================================================
+_model = None
+_tokenizer = None
+_model_path = None
+_model_type = None  # "base", "raft", "qa"
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
-def _resolve_model_path() -> str:
+def _detect_model_type(path: str) -> str:
+    """Deteksi tipe model berdasarkan nama path."""
+    basename = os.path.basename(os.path.abspath(path))
+    if "raft" in basename.lower():
+        return "raft"
+    elif "perdes" in basename.lower() or "merged" in basename.lower():
+        return "qa"
+    elif "Llama" in basename or "base" in basename.lower():
+        return "base"
+    return "unknown"
+
+
+def _resolve_model_path(requested_path: Optional[str] = None) -> str:
     """
-    Walk MODEL_PATHS in order; return the first directory that exists.
-    Falls back to BASE_MODEL_NAME if none found.
+    Resolve path model yang akan di-load.
+    Priority:
+      1. requested_path (jika diberikan dan valid)
+      2. Model fine-tuned pertama yang ditemukan (MODEL_PATHS)
+      3. Base model (fallback)
     """
+    if requested_path:
+        abs_path = os.path.abspath(requested_path)
+        if os.path.isdir(abs_path):
+            return abs_path
+        logger.warning(f"Path tidak ditemukan: {abs_path}, mencoba fallback...")
+
+    # Coba model fine-tuned dulu
     for path in MODEL_PATHS:
         if os.path.isdir(path):
+            logger.info(f"Model fine-tuned ditemukan: {path}")
             return path
+
+    # Fallback ke base model
     if os.path.isdir(BASE_MODEL_NAME):
+        logger.info(f"Menggunakan base model: {BASE_MODEL_NAME}")
         return BASE_MODEL_NAME
+
     raise FileNotFoundError(
-        f"No model directory found. Checked:\n"
-        + "\n".join(f"  - {p}" for p in MODEL_PATHS)
-        + f"\n  - {BASE_MODEL_NAME} (base fallback)"
+        f"Tidak ada model yang ditemukan! "
+        f"Fine-tuned paths: {MODEL_PATHS}, Base: {BASE_MODEL_NAME}"
     )
 
 
-def get_error_detail(e: Exception) -> str:
-    """Return full traceback string for logging."""
-    return "".join(traceback.format_exception(type(e), e, e.__traceback__))
-
-
-def get_model_info() -> dict:
-    """Return metadata about the currently loaded model."""
-    return {
-        "loaded": _model is not None,
-        "model_path": _loaded_model_path,
-        "max_seq_length": MAX_SEQ_LENGTH,
-        "load_error": _load_error,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Model loading
-# ---------------------------------------------------------------------------
-
-def load_model(model_path: Optional[str] = None) -> None:
+def load_model(requested_path: Optional[str] = None):
     """
-    Load the model and tokenizer into global state using Unsloth.
-
-    If `model_path` is None, resolves automatically via `_resolve_model_path()`.
-    Calling this when a model is already loaded is a no-op (unless path differs).
+    Load model dan tokenizer ke GPU.
+    Menggunakan Unsloth FastLanguageModel untuk inference yang efisien.
     """
-    global _model, _tokenizer, _loaded_model_path, _load_error
+    global _model, _tokenizer, _model_path, _model_type
 
-    resolved_path = model_path or _resolve_model_path()
+    from unsloth import FastLanguageModel
 
-    # Skip if already loaded with the same path
-    if _model is not None and _loaded_model_path == resolved_path:
-        logger.info(f"Model already loaded from: {resolved_path}")
-        return
+    path = _resolve_model_path(requested_path)
+    model_type = _detect_model_type(path)
 
-    _load_error = None
-    logger.info(f"Loading model from: {resolved_path}")
+    logger.info(f"Loading model dari: {path} (tipe: {model_type})")
 
-    try:
-        from unsloth import FastLanguageModel
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=path,
+        max_seq_length=2048,
+        dtype=None,
+        load_in_4bit=True,
+        device_map="auto",
+    )
 
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=resolved_path,
-            max_seq_length=MAX_SEQ_LENGTH,
-            dtype=None,          # auto-detect Float16 / BFloat16
-            load_in_4bit=True,   # QLoRA 4-bit inference
-            device_map="auto",
-        )
+    # Set ke inference mode
+    FastLanguageModel.for_inference(model)
 
-        # Switch to inference mode (disables training-only ops)
-        FastLanguageModel.for_inference(model)
+    _model = model
+    _tokenizer = tokenizer
+    _model_path = path
+    _model_type = model_type
 
-        _model = model
-        _tokenizer = tokenizer
-        _loaded_model_path = resolved_path
-
-        logger.info(f"Model loaded successfully: {resolved_path}")
-
-    except Exception as e:
-        _load_error = f"{type(e).__name__}: {str(e) or '(no message)'}"
-        logger.error(f"Failed to load model:\n{get_error_detail(e)}")
-        raise
+    logger.info(f"Model berhasil di-load: {path}")
 
 
-def _ensure_model_loaded() -> None:
-    """Lazy-load model on first call if not already in memory."""
-    if _model is None:
+def _ensure_model_loaded():
+    """Pastikan model sudah di-load. Auto-load jika belum."""
+    global _model, _tokenizer
+    if _model is None or _tokenizer is None:
+        logger.info("Model belum di-load, auto-loading...")
         load_model()
 
 
-# ---------------------------------------------------------------------------
-# Prompt formatting helpers
-# ---------------------------------------------------------------------------
-
-def _extract_system_and_docs(instruction_text: str) -> tuple:
+def _format_rag_context(dokumen: list) -> str:
     """
-    Split a RAFT instruction into (system_prompt, docs_section).
-
-    The boundary marker is '=== DOKUMEN KONTEKS ==='.
-    If the marker is absent, returns ("", full_instruction).
+    Format list dokumen menjadi string konteks RAFT.
+    Format harus SAMA PERSIS dengan training data.
     """
-    marker = "=== DOKUMEN KONTEKS ==="
-    idx = instruction_text.find(marker)
-    if idx >= 0:
-        system_prompt = instruction_text[:idx].strip()
-        docs_section = instruction_text[idx:].strip()
-    else:
-        system_prompt = ""
-        docs_section = instruction_text.strip()
-    return system_prompt, docs_section
+    docs_text = ""
+    for idx, doc in enumerate(dokumen, 1):
+        docs_text += f"\n\nDokumen {idx}:\n{doc}"
+    return docs_text
 
 
-def _build_messages_chat(message: str, system_prompt: Optional[str] = None) -> list:
-    """Build chat messages for plain chat (no RAG context)."""
-    sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
-    return [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": message},
-    ]
-
-
-def _build_messages_rag(message: str, konteks: str) -> list:
+def generate_answer(pertanyaan: str, max_new_tokens: int = 512,
+                    temperature: float = 0.1, top_p: float = 0.9,
+                    repetition_penalty: float = 1.1) -> dict:
     """
-    Build chat messages for RAG mode.
+    Generate jawaban TANPA konteks dokumen (plain chat).
+    Cocok untuk model base atau model Q&A sederhana.
 
-    `konteks` is the full document block including:
-      === DOKUMEN KONTEKS ===
-      [DOKUMEN 1] [GOLD_DOCUMENT] ...
-      ---
-      [DOKUMEN 2] [DISTRACTOR] ...
-      === AKHIR DOKUMEN KONTEKS ===
-    """
-    return [
-        {"role": "system", "content": RAG_SYSTEM_PROMPT},
-        {"role": "user", "content": f"{konteks}\n\n{message}"},
-    ]
+    Args:
+        pertanyaan: Pertanyaan user
+        max_new_tokens: Jumlah maksimal token yang di-generate
+        temperature: Suhu sampling (lebih rendah = lebih deterministik)
+        top_p: Top-p (nucleus) sampling
+        repetition_penalty: Penalty untuk repetisi
 
-
-# ---------------------------------------------------------------------------
-# Inference
-# ---------------------------------------------------------------------------
-
-def _generate(messages: list, max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS) -> str:
-    """
-    Run inference given a list of chat messages.
-
-    Returns the decoded assistant response string.
+    Returns:
+        dict dengan key: answer, model_type, model_path
     """
     _ensure_model_loaded()
 
-    eos_token = _tokenizer.eos_token
+    messages = [
+        {"role": "system", "content": PLAIN_SYSTEM_PROMPT},
+        {"role": "user", "content": pertanyaan},
+    ]
 
-    # Apply the Llama 3.1 chat template
     input_ids = _tokenizer.apply_chat_template(
         messages,
         tokenize=True,
@@ -229,54 +197,261 @@ def _generate(messages: list, max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS) -> s
     output_ids = _model.generate(
         input_ids,
         max_new_tokens=max_new_tokens,
-        temperature=0.1,
+        temperature=temperature,
         do_sample=True,
-        top_p=0.9,
-        repetition_penalty=1.1,
+        top_p=top_p,
+        repetition_penalty=repetition_penalty,
     )
 
-    # Decode only the generated portion (exclude the prompt tokens)
-    generated_tokens = output_ids[0][input_ids.shape[1]:]
-    response = _tokenizer.decode(generated_tokens, skip_special_tokens=True)
+    response = _tokenizer.decode(
+        output_ids[0][input_ids.shape[1]:],
+        skip_special_tokens=True,
+    )
 
-    return response.strip()
+    return {
+        "answer": response.strip(),
+        "model_type": _model_type,
+        "model_path": _model_path,
+    }
 
 
-def generate_answer(
-    message: str,
-    system_prompt: Optional[str] = None,
-    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
-) -> str:
+def _split_cot_answer(raw_response: str) -> tuple:
     """
-    Generate an answer without RAG context (plain chat).
+    Pisahkan Chain-of-Thought (analisis) dari jawaban akhir.
+    Model RAFT menghasilkan: {analisis/CoT}\n\n{jawaban}
+    Returns: tuple (analisis, jawaban)
+    """
+    text = raw_response.strip()
+    separator = "\n\n"
+    last_sep_idx = text.rfind(separator)
 
-    Args:
-        message:        User's question.
-        system_prompt:  Optional system prompt override.
-        max_new_tokens: Maximum tokens to generate.
+    if last_sep_idx == -1:
+        return "", text
+
+    analisis = text[:last_sep_idx].strip()
+    jawaban = text[last_sep_idx + len(separator):].strip()
+
+    # Validasi: kalau jawaban terlalu pendek, coba separator sebelumnya
+    if len(jawaban) < 10:
+        second_last = text.rfind(separator, 0, last_sep_idx)
+        if second_last != -1:
+            kandidat = text[second_last + len(separator):].strip()
+            if len(kandidat) > len(jawaban):
+                analisis = text[:second_last].strip()
+                jawaban = kandidat
+
+    return analisis, jawaban
+
+
+def _extract_doc_number(analisis: str) -> Optional[int]:
+    """Ekstrak nomor dokumen relevan dari analisis CoT."""
+    patterns = [
+        r"[Dd]okumen\s+(\d+)\s+.*?[Rr]elevan",
+        r"[Dd]okumen\s+(\d+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, analisis)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _extract_doc_content(dokumen: list, doc_number: int) -> str:
+    """Ekstrak inti konten dari dokumen relevan (1-based index)."""
+    idx = doc_number - 1
+    if idx < 0 or idx >= len(dokumen):
+        return ""
+
+    content = dokumen[idx].strip()
+    lines = content.split("\n")
+    body_lines = []
+    skip_header = True
+    for line in lines:
+        stripped = line.strip()
+        if skip_header and (stripped.lower().startswith("pasal") or stripped == ""):
+            continue
+        skip_header = False
+        body_lines.append(stripped)
+
+    body = " ".join(body_lines).strip()
+    if len(body) > 300:
+        last_period = body[:300].rfind(".")
+        if last_period > 50:
+            body = body[:last_period + 1]
+        else:
+            body = body[:300].rsplit(" ", 1)[0] + "."
+    return body
+
+
+def _enrich_jawaban(jawaban: str, analisis: str,
+                    dokumen: list) -> str:
+    """
+    Perkaya jawaban jika terlalu singkat atau hanya 'Dokumen X'.
+    Hapus referensi (Dokumen N) dari jawaban.
+    """
+    cleaned = jawaban.strip()
+    has_substance = len(cleaned) > 40 and not re.match(
+        r"^[Dd]okumen\s+\d+", cleaned
+    )
+
+    # Strip semua referensi (Dokumen N) dari jawaban
+    cleaned = re.sub(r"\s*\([Dd]okumen\s+\d+\)\s*", " ", cleaned).strip()
+    cleaned = re.sub(r"\s*[Dd]okumen\s+\d+\.?\s*$", "", cleaned).strip()
+
+    if has_substance:
+        return cleaned
+
+    doc_number = _extract_doc_number(analisis)
+    if doc_number is None:
+        match = re.search(r"[Dd]okumen\s+(\d+)", cleaned)
+        if match:
+            doc_number = int(match.group(1))
+
+    if doc_number is None:
+        return cleaned
+
+    doc_content = _extract_doc_content(dokumen, doc_number)
+    if not doc_content:
+        return cleaned
+
+    return doc_content
+
+
+# Prompt untuk rewrite jawaban RAFT menjadi lebih natural (pass ke-2)
+_REWRITE_SYSTEM_PROMPT = (
+    "Anda adalah asisten hukum yang ramah dan santai. "
+    "Tulis ulang jawaban di bawah ini dengan gaya bahasa yang luwes, "
+    "mengalir, dan enak dibaca — seperti sedang menjelaskan ke teman. "
+    "Jangan menambah informasi baru, hanya ubah gaya bahasa. "
+    "Tetap sertakan fakta dan angka yang akurat."
+)
+
+
+def _rewrite_jawaban_natural(pertanyaan: str, jawaban: str) -> str:
+    """
+    Tulis ulang jawaban RAFT dengan gaya natural dan santai
+    menggunakan second-pass generation (tanpa dokumen konteks).
+
+    Ini membuat output chat-rag setara dengan gaya chat (plain),
+    tapi tetap akurat karena fakta berasal dari pass pertama (RAG).
+    """
+    if not jawaban or len(jawaban) < 5:
+        return jawaban
+
+    messages = [
+        {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            f"Pertanyaan: {pertanyaan}\n\n"
+            f"Jawaban: {jawaban}\n\n"
+            f"Tulis ulang jawaban di atas dengan lebih natural dan santai:"
+        )},
+    ]
+
+    input_ids = _tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to("cuda")
+
+    output_ids = _model.generate(
+        input_ids,
+        max_new_tokens=256,
+        temperature=0.5,
+        do_sample=True,
+        top_p=0.9,
+        repetition_penalty=1.15,
+    )
+
+    rewritten = _tokenizer.decode(
+        output_ids[0][input_ids.shape[1]:],
+        skip_special_tokens=True,
+    ).strip()
+
+    # Pakai hasil rewrite kalau ada substansinya
+    if len(rewritten) > 15:
+        return rewritten
+    return jawaban
+
+
+def generate_answer_rag(pertanyaan: str, dokumen: list,
+                        max_new_tokens: int = 512,
+                        temperature: float = 0.7, top_p: float = 0.9,
+                        repetition_penalty: float = 1.1) -> dict:
+    """
+    Generate jawaban DENGAN konteks dokumen (RAG / RAFT format).
+    Format prompt HARUS SAMA PERSIS dengan training data RAFT.
+
+    Response dipisah menjadi 2 field:
+    - analisis: Chain-of-Thought (evaluasi relevansi dokumen)
+    - jawaban: Jawaban akhir yang ringkas dan lengkap
 
     Returns:
-        Generated answer string.
+        dict dengan key: analisis, jawaban, raw_response, model_type, model_path, num_documents
     """
-    messages = _build_messages_chat(message, system_prompt)
-    return _generate(messages, max_new_tokens)
+    _ensure_model_loaded()
+
+    # Format dokumen konteks (SAMA PERSIS dengan training)
+    docs_text = _format_rag_context(dokumen)
+    user_message = f"{pertanyaan}{docs_text}"
+
+    messages = [
+        {"role": "system", "content": RAFT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
+
+    input_ids = _tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to("cuda")
+
+    output_ids = _model.generate(
+        input_ids,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        do_sample=True,
+        top_p=top_p,
+        repetition_penalty=repetition_penalty,
+    )
+
+    response = _tokenizer.decode(
+        output_ids[0][input_ids.shape[1]:],
+        skip_special_tokens=True,
+    )
+
+    raw_response = response.strip()
+    analisis, jawaban = _split_cot_answer(raw_response)
+
+    # Perkaya jawaban jika terlalu singkat (cuma "Dokumen X")
+    jawaban = _enrich_jawaban(jawaban, analisis, dokumen)
+
+    # Pass ke-2: tulis ulang jawaban agar natural seperti /api/chat
+    jawaban = _rewrite_jawaban_natural(pertanyaan, jawaban)
+
+    return {
+        "analisis": analisis,
+        "jawaban": jawaban,
+        "raw_response": raw_response,
+        "model_type": _model_type,
+        "model_path": _model_path,
+        "num_documents": len(dokumen),
+    }
 
 
-def generate_answer_rag(
-    message: str,
-    konteks: str,
-    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
-) -> str:
-    """
-    Generate an answer with RAG context (fine-tuned RAFT model).
+def get_model_info() -> dict:
+    """Info model yang sedang aktif."""
+    return {
+        "loaded": _model is not None,
+        "model_path": _model_path,
+        "model_type": _model_type,
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_count": torch.cuda.device_count(),
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    }
 
-    Args:
-        message:        User's question.
-        konteks:        Document context block (GOLD + DISTRACTOR docs).
-        max_new_tokens: Maximum tokens to generate.
 
-    Returns:
-        Generated answer string grounded in the provided context.
-    """
-    messages = _build_messages_rag(message, konteks)
-    return _generate(messages, max_new_tokens)
+def get_error_detail(e: Exception) -> str:
+    """Format error detail untuk logging."""
+    return f"{type(e).__name__}: {str(e) or '(no message)'}\n{traceback.format_exc()}"
