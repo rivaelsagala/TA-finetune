@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, Response, stream_with_context
+from flask import Blueprint, request, jsonify
 from llama_service import (
     generate_answer,
     generate_answer_rag,
@@ -10,8 +10,6 @@ from llama_service import (
 )
 import logging
 import os
-import json
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -167,9 +165,9 @@ def chat_rag():
             }), 400
 
         max_new_tokens = data.get("max_new_tokens", 512)
-        temperature = data.get("temperature", 0.1)
+        temperature = data.get("temperature", 0.7)
         top_p = data.get("top_p", 0.9)
-        repetition_penalty = data.get("repetition_penalty", 1.1)
+        repetition_penalty = data.get("repetition_penalty", 1.15)
 
         result = generate_answer_rag(
             pertanyaan=pertanyaan,

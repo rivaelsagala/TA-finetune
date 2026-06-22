@@ -218,6 +218,35 @@ SYSTEM_PROMPT = (
     "pertanyaan, jadi pilihlah informasi dari dokumen yang paling sesuai."
 )
 
+# ============================================================================
+# STRATEGI ANTI-MONOTON: Variasi format response saat training
+# ============================================================================
+# Model dilatih dengan BERBAGAI gaya jawaban agar tidak kaku/robotic.
+# Setiap sampel mendapat salah satu dari beberapa template response secara acak.
+import random
+
+random.seed(3407)
+
+# Template transisi dari analisis ke jawaban (bervariasi)
+TRANSITION_PHRASES = [
+    "\n\n",
+    "\n\nBerdasarkan analisis di atas, ",
+    "\n\nDari uraian tersebut, ",
+    "\n\nKesimpulannya, ",
+    "\n\nDengan demikian, ",
+    "\n\nJadi, ",
+    "\n\nSebagai kesimpulan, ",
+    "\n\nMaka dari itu, ",
+]
+
+# Template pembuka analisis (bervariasi)
+ANALYSIS_OPENERS = [
+    "",
+    "Mari analisis dokumen-dokumen yang tersedia.\n",
+    "Berikut analisis relevansi dokumen.\n",
+    "Saya akan evaluasi setiap dokumen.\n",
+]
+
 
 def formatting_prompts_func(examples):
     instructions = examples["instruction"]
@@ -226,7 +255,9 @@ def formatting_prompts_func(examples):
     completions = examples["completion"]
     texts = []
 
-    for instr, docs, cot, comp in zip(instructions, documents_list, thought_processes, completions):
+    for i, (instr, docs, cot, comp) in enumerate(
+        zip(instructions, documents_list, thought_processes, completions)
+    ):
         # Format dokumen sebagai numbered list
         docs_text = ""
         for idx, doc in enumerate(docs, 1):
@@ -235,8 +266,21 @@ def formatting_prompts_func(examples):
         # User message: pertanyaan + dokumen konteks
         user_message = f"{instr}{docs_text}"
 
-        # Assistant response: Chain-of-Thought + jawaban akhir
-        assistant_response = f"{cot}\n\n{comp}"
+        # ============================================================
+        # VARIASI FORMAT RESPONSE (anti-monoton)
+        # Setiap sampel mendapat variasi transisi dan pembuka yang berbeda.
+        # Ini membuat model belajar menghasilkan jawaban yang lebih natural
+        # dan tidak selalu mengikuti pola yang sama persis.
+        # ============================================================
+        # Pilih variasi berdasarkan index agar deterministik (reproducible)
+        # tapi tetap beragam across dataset
+        rng = random.Random(i * 3407 + 42)
+
+        transition = rng.choice(TRANSITION_PHRASES)
+        analysis_opener = rng.choice(ANALYSIS_OPENERS)
+
+        # Assistant response: analisis + transisi bervariasi + jawaban akhir
+        assistant_response = f"{analysis_opener}{cot}{transition}{comp}"
 
         text = (
             f"<|begin_of_text|>"
@@ -274,10 +318,11 @@ from transformers import TrainingArguments
 from unsloth import is_bfloat16_supported
 
 LEARNING_RATE = 2e-4
-NUM_EPOCHS = 20
+NUM_EPOCHS = 15  # Dikurangi dari 20 -> 15 untuk cegah overfitting ke pola monoton
 WARMUP_STEPS = 5
 BATCH_SIZE = 2
 GRAD_ACCUM_STEPS = 4
+WEIGHT_DECAY = 0.02  # Naikkan sedikit untuk regularisasi (cegah overfitting)
 
 # Hitung max_steps berdasarkan jumlah epoch
 steps_per_epoch = (len(dataset) // (BATCH_SIZE * GRAD_ACCUM_STEPS)) + 1
@@ -312,7 +357,7 @@ trainer = SFTTrainer(
         bf16=is_bfloat16_supported(),
         logging_steps=1,
         optim="adamw_8bit",
-        weight_decay=0.01,
+        weight_decay=WEIGHT_DECAY,
         lr_scheduler_type="linear",
         seed=3407,
         output_dir="outputs_lora",
@@ -401,10 +446,12 @@ for i, test_case in enumerate(test_cases):
     output_ids = model.generate(
         input_ids,
         max_new_tokens=512,
-        temperature=0.1,
+        temperature=0.3,      # Rendah untuk evaluasi deterministik; production pakai 0.7
         do_sample=True,
         top_p=0.9,
-        repetition_penalty=1.1,
+        top_k=50,              # Tambahan: batasi vocabulary tapi tetap beragam
+        repetition_penalty=1.15,  # Naik sedikit dari 1.1 -> 1.15
+        min_p=0.05,            # Tambahan: cutoff probabilitas minimum (teknik modern)
     )
 
     response = tokenizer.decode(

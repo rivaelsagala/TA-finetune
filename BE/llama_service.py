@@ -317,67 +317,12 @@ def _enrich_jawaban(jawaban: str, analisis: str,
     return doc_content
 
 
-# Prompt untuk rewrite jawaban RAFT menjadi lebih natural (pass ke-2)
-_REWRITE_SYSTEM_PROMPT = (
-    "Anda adalah asisten hukum yang ramah dan santai. "
-    "Tulis ulang jawaban di bawah ini dengan gaya bahasa yang luwes, "
-    "mengalir, dan enak dibaca — seperti sedang menjelaskan ke teman. "
-    "Jangan menambah informasi baru, hanya ubah gaya bahasa. "
-    "Tetap sertakan fakta dan angka yang akurat."
-)
-
-
-def _rewrite_jawaban_natural(pertanyaan: str, jawaban: str) -> str:
-    """
-    Tulis ulang jawaban RAFT dengan gaya natural dan santai
-    menggunakan second-pass generation (tanpa dokumen konteks).
-
-    Ini membuat output chat-rag setara dengan gaya chat (plain),
-    tapi tetap akurat karena fakta berasal dari pass pertama (RAG).
-    """
-    if not jawaban or len(jawaban) < 5:
-        return jawaban
-
-    messages = [
-        {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
-        {"role": "user", "content": (
-            f"Pertanyaan: {pertanyaan}\n\n"
-            f"Jawaban: {jawaban}\n\n"
-            f"Tulis ulang jawaban di atas dengan lebih natural dan santai:"
-        )},
-    ]
-
-    input_ids = _tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-    ).to("cuda")
-
-    output_ids = _model.generate(
-        input_ids,
-        max_new_tokens=256,
-        temperature=0.5,
-        do_sample=True,
-        top_p=0.9,
-        repetition_penalty=1.15,
-    )
-
-    rewritten = _tokenizer.decode(
-        output_ids[0][input_ids.shape[1]:],
-        skip_special_tokens=True,
-    ).strip()
-
-    # Pakai hasil rewrite kalau ada substansinya
-    if len(rewritten) > 15:
-        return rewritten
-    return jawaban
 
 
 def generate_answer_rag(pertanyaan: str, dokumen: list,
                         max_new_tokens: int = 512,
                         temperature: float = 0.7, top_p: float = 0.9,
-                        repetition_penalty: float = 1.1) -> dict:
+                        repetition_penalty: float = 1.15) -> dict:
     """
     Generate jawaban DENGAN konteks dokumen (RAG / RAFT format).
     Format prompt HARUS SAMA PERSIS dengan training data RAFT.
@@ -413,7 +358,9 @@ def generate_answer_rag(pertanyaan: str, dokumen: list,
         temperature=temperature,
         do_sample=True,
         top_p=top_p,
+        top_k=50,
         repetition_penalty=repetition_penalty,
+        min_p=0.05,
     )
 
     response = _tokenizer.decode(
@@ -426,9 +373,6 @@ def generate_answer_rag(pertanyaan: str, dokumen: list,
 
     # Perkaya jawaban jika terlalu singkat (cuma "Dokumen X")
     jawaban = _enrich_jawaban(jawaban, analisis, dokumen)
-
-    # Pass ke-2: tulis ulang jawaban agar natural seperti /api/chat
-    jawaban = _rewrite_jawaban_natural(pertanyaan, jawaban)
 
     return {
         "analisis": analisis,

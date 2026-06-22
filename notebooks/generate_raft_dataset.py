@@ -1,769 +1,701 @@
 """
-generate_raft_dataset.py
-========================
-Generate RAFT (Retrieval Augmented Fine-Tuning) dataset dari chunk dokumen
-peraturan desa, sesuai metodologi Zhang et al. (2024).
+RAFT (Retrieval-Augmented Fine-Tuning) Dataset Generator
+Two-phase approach:
+  Phase 1 — Generate all samples with random style variation (no retry/repair).
+  Phase 2 — Scan output, validate, regenerate only failed samples with different style + feedback.
+  Final dataset = merge original valid + repaired.
 
-Referensi:
-  Zhang, T., Shao, F., Garg, S., et al. (2024). "RAFT: Adapting Language
-  Model to Domain Specific RAG." Transactions on ML Research.
-  https://arxiv.org/abs/2403.10131
-
-Output: JSONL file di data/ dengan format RAFT standar.
-
-Cara pakai:
-  cd notebooks/
-  python generate_raft_dataset.py
+Style system: 4 styles (direct, explanatory, elaborated, structured), equal 25% each,
+separate tailored prompts.
 """
+from __future__ import annotations
 
 import json
-import random
 import os
+import random
+import re
+import shutil
+import time
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
-from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-# ============================================================================
-# Konfigurasi
-# ============================================================================
-random.seed(42)
+import requests
+from dotenv import load_dotenv
+from tqdm import tqdm
 
-# Path
-CHUNKS_PATH = "../data/PERATURAN_DESA_LOA_KECAMATAN_PASEH_KABUPATEN_BANDUNG_NOMOR___5_TAHUN_2017__chunks.json"
-OUTPUT_PATH = "../data/raft_dataset_loa_5_2017.jsonl"
+# ─── Load environment ─────────────────────────────────────────────────────────
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-# RAFT hyperparameters (Zhang et al., 2024)
-P_ORACLE = 0.80          # 80% sampel memiliki oracle document
-N_DISTRACTORS = 3        # Jumlah distractor per sampel (K=3)
-MIN_CONTENT_CHARS = 120  # Minimum karakter content untuk layak jadi oracle
+# ─── Paths ────────────────────────────────────────────────────────────────────
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+CHUNKS_FILE = (
+    DATA_DIR
+    / "PERATURAN_DESA_LOA_KECAMATAN_PASEH_KABUPATEN_BANDUNG_NOMOR___5_TAHUN_2017__chunks.json"
+)
+OUTPUT_FILE = DATA_DIR / "raft_perdes_dataset.jsonl"
+REPAIRED_FILE = DATA_DIR / "raft_perdes_dataset_repaired.jsonl"
 
-# Metadata peraturan
-TITLE = "Peraturan Desa Loa No. 5 Tahun 2017 - Rencana Kerja Pembangunan Desa (Rkp-Desa) Tahun Anggaran 2018"
-VILLAGE = "loa"
-REGENCY = "bandung"
-PERDES_NUMBER = "5"
-PERDES_YEAR = "2017"
+# ─── Configuration ────────────────────────────────────────────────────────────
 
-# System prompt (harus sama persis dengan yang dipakai saat inference)
-SYSTEM_PROMPT_ORACLE = (
-    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
-    "Peraturan Desa (Perdes) di Kabupaten Bandung.\n\n"
-    "Di bawah ini terdapat beberapa potongan dokumen peraturan desa. "
-    "Tidak semua dokumen relevan dengan pertanyaan. Baca seluruh isi dokumen, "
-    "lalu gunakan HANYA informasi dari dokumen yang relevan untuk menjawab "
-    "pertanyaan."
+@dataclass
+class GeneratorConfig:
+    generator_model: str = "openai/gpt-4o-mini"
+    max_tokens: int = 1024
+    temperature_question: float = 0.8
+    temperature_thought: float = 0.6
+    temperature_completion: float = 0.7
+    top_p: float = 0.9
+    request_delay: float = 1.5
+    num_distractors: int = 2
+    chunks_per_doc: Optional[int] = 5  # None = full
+    min_completion_length: int = 80
+    max_retries: int = 2
+    seed: int = 42
+
+
+# ─── Style Definitions ────────────────────────────────────────────────────────
+# 4 styles, equal 25% probability, each with separate tailored system+user prompt.
+# Same base constraints, different format directives.
+
+_BASE_CONSTRAINTS = (
+    "Aturan umum (WAJIB ditaati):\n"
+    "- Gunakan bahasa Indonesia yang natural dan profesional.\n"
+    "- JANGAN pernah menyebut 'Dokumen 1', 'Dokumen 2', 'Dokumen 3', dst. "
+    "Gunakan nomor Pasal, nama Peraturan, atau 'Peraturan Desa' sebagai rujukan.\n"
+    "- JANGAN mengarang informasi yang tidak ada di dokumen yang diberikan.\n"
+    "- Jika dokumen tidak mengandung jawaban yang memadai, nyatakan secara eksplisit "
+    "bahwa informasi tidak ditemukan dalam dokumen yang diberikan.\n"
+    "- Jawab dalam 2-4 kalimat, minimal 80 karakter.\n"
+    "- Sertakan minimal satu fakta spesifik (angka, definisi, nama jabatan, atau istilah hukum) "
+    "yang terdapat dalam dokumen sumber.\n"
 )
 
-SYSTEM_PROMPT_NO_ORACLE = (
-    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
-    "Peraturan Desa (Perdes) di Kabupaten Bandung.\n\n"
-    "Di bawah ini terdapat beberapa potongan dokumen peraturan desa. "
-    "PERHATIAN: tidak ada dokumen yang relevan dengan pertanyaan. "
-    "Jika isi dokumen tidak menjawab pertanyaan, katakan secara jujur "
-    "bahwa informasi tersebut tidak ditemukan."
-)
+STYLE_PROMPTS: Dict[str, Dict[str, str]] = {
+    "direct": {
+        "system": (
+            "Anda adalah asisten hukum profesional yang menjawab secara langsung dan ringkas.\n\n"
+            + _BASE_CONSTRAINTS
+            + "\nFormat jawaban (gaya langsung):\n"
+            "- Jawaban langsung ke inti, tanpa pembuka panjang.\n"
+            "- Gunakan pola: '[Konsep] adalah [definisi/ketentuan], sebagaimana diatur dalam Pasal [N].'\n"
+            "- Hindari frasa pembuka seperti 'Berdasarkan dokumen...' atau 'Menurut peraturan...' "
+            "kecuali diperlukan untuk kejelasan.\n"
+        ),
+        "user_suffix": "Jawab secara langsung dan ringkas:",
+    },
+    "explanatory": {
+        "system": (
+            "Anda adalah asisten hukum profesional yang menjawab dengan memberikan penjelasan sebab-akibat.\n\n"
+            + _BASE_CONSTRAINTS
+            + "\nFormat jawaban (gaya penjelasan):\n"
+            "- Mulai dengan pernyataan fakta/definisi, lalu jelaskan MENGAPA hal itu penting atau apa akibatnya.\n"
+            "- Gunakan pola: '[Konsep] adalah [definisi]. Hal ini penting karena [alasan]...'\n"
+            "- Berikan konteks tambahan yang membantu pemahaman pembaca.\n"
+        ),
+        "user_suffix": "Jawab dengan penjelasan sebab-akibat:",
+    },
+    "elaborated": {
+        "system": (
+            "Anda adalah asisten hukum profesional yang menjawab dengan elaborasi dan konteks latar belakang.\n\n"
+            + _BASE_CONSTRAINTS
+            + "\nFormat jawaban (gaya elaborasi):\n"
+            "- Mulai dengan merujuk Pasal/Peraturan, lalu jabarkan isinya, lalu jelaskan tujuan atau latar belakangnya.\n"
+            "- Gunakan pola: 'Menurut Pasal [N], [konsep] adalah [definisi]. Ketentuan ini bertujuan untuk [tujuan]...'\n"
+            "- Berikan elaborasi yang informatif tanpa mengarang.\n"
+        ),
+        "user_suffix": "Jawab dengan elaborasi dan konteks:",
+    },
+    "structured": {
+        "system": (
+            "Anda adalah asisten hukum profesional yang menjawab dalam format terstruktur/poin.\n\n"
+            + _BASE_CONSTRAINTS
+            + "\nFormat jawaban (gaya terstruktur):\n"
+            "- Sajikan jawaban dalam bentuk poin bernomor di dalam satu kalimat atau beberapa kalimat.\n"
+            "- Gunakan pola: '[Konsep] mencakup: (1) [poin 1], (2) [poin 2], (3) [poin 3].'\n"
+            "- Setiap poin harus ringkas namun informatif.\n"
+        ),
+        "user_suffix": "Jawab dalam format terstruktur:",
+    },
+}
 
-# Jawaban untuk no-oracle samples
-NO_ORACLE_COT = (
-    "##Reason: Tidak ada dokumen relevan di antara konteks yang diberikan.\n"
-    "##Answer: Informasi yang relevan untuk menjawab pertanyaan ini tidak "
-    "ditemukan dalam dokumen yang tersedia. Disarankan untuk merujuk langsung "
-    "pada dokumen Peraturan Desa terkait."
-)
+STYLE_NAMES: List[str] = list(STYLE_PROMPTS.keys())
+STYLE_WEIGHTS: List[float] = [0.30, 0.30, 0.25, 0.15]  # direct, explanatory, elaborated, structured
 
-NO_ORACLE_ANSWER = (
-    "Informasi yang relevan untuk menjawab pertanyaan ini tidak "
-    "ditemukan dalam dokumen yang tersedia. Disarankan untuk merujuk langsung "
-    "pada dokumen Peraturan Desa terkait."
-)
+# Anti-monotony: rolling window of recent completions for diversity checking
+_recent_completions: deque = deque(maxlen=5)
 
 
-# ============================================================================
-# Helper functions
-# ============================================================================
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SHARED UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def load_chunks(path: str) -> list:
-    """Load chunks dari file JSON."""
+# ─── API Client ───────────────────────────────────────────────────────────────
+
+def call_api(
+    messages: List[Dict[str, str]],
+    model: str,
+    temperature: float = 0.7,
+    max_tokens: int = 1024,
+    top_p: float = 0.9,
+    max_attempts: int = 3,
+) -> str:
+    """Call OpenAI-compatible API with retry and exponential backoff.
+
+    Handles 429, 503, timeouts, and general errors.
+    Raises RuntimeError after all attempts exhausted.
+    """
+    url = f"{OPENAI_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "top_p": top_p,
+    }
+
+    for attempt in range(max_attempts):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=120)
+            if resp.status_code in (429, 503):
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                print(f"  [API] Rate limited ({resp.status_code}), waiting {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+        except requests.exceptions.Timeout:
+            print(f"  [API] Timeout on attempt {attempt + 1}/{max_attempts}")
+            time.sleep(2 ** attempt)
+        except requests.exceptions.RequestException as e:
+            print(f"  [API] Error on attempt {attempt + 1}/{max_attempts}: {e}")
+            time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"API call failed after {max_attempts} attempts")
+
+
+def clean_chunk_content(text: str) -> str:
+    """Normalize whitespace and strip chunk text."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def load_all_chunks(path: Path) -> List[Dict[str, Any]]:
+    """Load chunk JSON file and return list of chunk dicts."""
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        chunks = json.load(f)
+    print(f"Loaded {len(chunks)} chunks from {path.name}")
+    return chunks
 
 
-def get_clean_text(chunk: dict) -> str:
-    """
-    Ambil full content chunk (termasuk header metadata).
-    Ini adalah format yang dihasilkan retriever RAG saat inference.
-    Format: [dokumen: ...] [desa: ...] [kabupaten: ...] [nomor: ...]\n\n{content}
-    """
-    return chunk["content"].strip()
+def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Read a JSONL file into a list of dicts."""
+    samples: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                samples.append(json.loads(line))
+    return samples
 
 
-def get_pasal(chunk: dict) -> str:
-    """Ambil nama pasal dari metadata."""
-    return chunk["metadata"].get("section", chunk.get("pasal", "pasal 1"))
+def write_jsonl(samples: List[Dict[str, Any]], path: Path) -> None:
+    """Write samples to JSONL file."""
+    with open(path, "w", encoding="utf-8") as f:
+        for sample in samples:
+            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    print(f"Wrote {len(samples)} samples to {path}")
 
 
-def get_pasal_title(chunk: dict) -> str:
-    """Ambil judul pasal dari content (baris pertama setelah header)."""
-    text = get_clean_text(chunk)
-    for line in text.split("\n"):
-        line = line.strip()
-        if line.lower().startswith("pasal"):
-            return line
-    return get_pasal(chunk)
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE 1 — GENERATION (no retry, no repair)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-def format_doc_block(chunk: dict) -> str:
-    """
-    Format satu dokumen dalam konteks block.
-    Menggunakan raw content dari chunk (persis output retriever RAG).
-    TANPA label GOLD/DISTRACTOR.
-    """
-    return get_clean_text(chunk)
-
-
-def build_context_block(docs: list) -> str:
-    """
-    Bangun blok === DOKUMEN KONTEKS === dari list raw content string.
-    """
-    parts = ["=== DOKUMEN KONTEKS ===\n"]
-    for i, doc in enumerate(docs, 1):
-        parts.append(f"[DOKUMEN {i}]\n{doc}")
-        if i < len(docs):
-            parts.append("\n---\n")
-    parts.append("\n=== AKHIR DOKUMEN KONTEKS ===")
-    return "\n".join(parts)
-
-
-# ============================================================================
-# Question generation
-# ============================================================================
-
-# Template pertanyaan - divariasikan agar model robust terhadap berbagai formulasi
-QUESTION_TEMPLATES = [
-    "Apa isi dari {pasal} dalam {title}?",
-    "Bagaimana bunyi {pasal} dari {title}?",
-    "Jelaskan isi {pasal} pada {title}",
-    "Tolong berikan penjelasan tentang {pasal} di {title}",
-    "Apa yang diatur dalam {pasal} {title}?",
-    "Apa bunyi {pasal} dari {title}?",
-    "Bagaimana ketentuan {pasal} dalam {title}?",
-    "Apa maksud dari {pasal} yang tercantum dalam {title}?",
-    "Di Desa Loa, apa isi {pasal} dalam {title}?",
-    "Apa saja poin-poin dalam {pasal} {title}?",
-]
-
-# Template pertanyaan spesifik untuk content definisi (pasal 1)
-DEFINITION_TEMPLATES = [
-    "Menurut {title}, apa yang dimaksud dengan {term}?",
-    "Apa definisi {term} dalam {title}?",
-    "Bagaimana {title} mendefinisikan {term}?",
-    "Dalam {title}, apa pengertian dari {term}?",
-]
-
-# Template pertanyaan untuk list items (pasal 6 sub-items)
-LIST_ITEM_TEMPLATES = [
-    "Apa saja contoh {category} dalam {title}?",
-    "Sebutkan bidang {category} menurut {title}",
-    "Dalam {title}, apa saja yang termasuk {category}?",
-]
-
-
-def extract_definition_term(text: str) -> str:
-    """
-    Untuk content definisi (pasal 1), ekstrak istilah yang didefinisikan.
-    Contoh: '9. pembangunan desa adalah upaya...' -> 'pembangunan desa'
-    """
-    lines = text.split("\n")
-    for line in lines:
-        line = line.strip()
-        # Skip baris 'pasal X'
-        if line.lower().startswith("pasal"):
-            continue
-        # Cari pola: "N. istilah adalah ..."
-        if " adalah " in line:
-            # Hapus nomor di depan
-            parts = line.split(".", 1)
-            if len(parts) > 1:
-                term_part = parts[1].strip()
-                term = term_part.split(" adalah ")[0].strip()
-                if len(term) > 3:
-                    return term
-    return ""
-
-
-def get_category_for_pasal6(chunk: dict) -> str:
-    """Tentukan kategori untuk chunk pasal 6 berdasarkan content."""
-    text = get_clean_text(chunk).lower()
-    if "infrastruktur" in text or "jalan" in text or "lingkungan" in text or "tambatan" in text:
-        return "pembangunan infrastruktur desa"
-    elif "kesehatan" in text or "posyandu" in text or "sanitasi" in text or "air bersih" in text:
-        return "sarana dan prasarana kesehatan"
-    elif "pendidikan" in text or "taman bacaan" in text or "pelatihan" in text or "seni" in text:
-        return "sarana dan prasarana pendidikan dan kebudayaan"
-    elif "pasar" in text or "bum desa" in text or "padi" in text or "ternak" in text or "ekonomi" in text:
-        return "pengembangan usaha ekonomi produktif"
-    elif "hijau" in text or "hutan" in text or "sungai" in text or "lingkungan hidup" in text:
-        return "pelestarian lingkungan hidup"
-    elif "pemberdayaan" in text or "kader" in text or "kelompok" in text or "perempuan" in text:
-        return "pemberdayaan masyarakat"
-    elif "pembinaan" in text or "ketentraman" in text or "kerukunan" in text:
-        return "pembinaan kemasyarakatan"
-    else:
-        return "pembangunan desa"
-
-
-def generate_question(chunk: dict) -> str:
-    """Generate pertanyaan berdasarkan tipe dan content chunk."""
-    pasal = get_pasal(chunk)
-    text = get_clean_text(chunk)
-    content_len = len(text)
-
-    # Untuk content definisi pendek dengan term yang jelas
-    if pasal == "pasal 1" and content_len < 400:
-        term = extract_definition_term(text)
-        if term:
-            template = random.choice(DEFINITION_TEMPLATES)
-            return template.format(title=TITLE, term=term)
-
-    # Untuk list items di pasal 6 (content pendek)
-    if pasal == "pasal 6" and content_len < 200:
-        category = get_category_for_pasal6(chunk)
-        template = random.choice(LIST_ITEM_TEMPLATES)
-        return template.format(title=TITLE, category=category)
-
-    # Default: template umum
-    template = random.choice(QUESTION_TEMPLATES)
-    return template.format(pasal=pasal, title=TITLE)
-
-
-# ============================================================================
-# CoT Answer generation (synthesized, NOT raw document dump)
-# ============================================================================
-
-def _strip_metadata_header(text: str) -> str:
-    """
-    Hapus baris metadata header '[dokumen: ...] [desa: ...] ...' dari awal text.
-    Kembalikan hanya isi konten pasal.
-    """
-    lines = text.split("\n")
-    content_lines = []
-    past_header = False
-    for line in lines:
-        if not past_header and line.strip().startswith("[dokumen:"):
-            continue  # skip metadata header line
-        if not past_header and line.strip() == "":
-            continue  # skip blank lines before content
-        past_header = True
-        content_lines.append(line)
-    return "\n".join(content_lines).strip()
-
-
-def _extract_definitions(text: str) -> list:
-    """
-    Ekstrak definisi dari konten pasal 1.
-    Return list of (number, term, definition) tuples.
-    Contoh: '1. desa adalah kesatuan masyarakat...' -> ('1', 'desa', 'kesatuan masyarakat...')
-    """
-    content = _strip_metadata_header(text)
-    definitions = []
-    current_def = ""
-    current_num = ""
-    current_term = ""
-
-    for line in content.split("\n"):
-        line_stripped = line.strip()
-        # Skip pasal header
-        if line_stripped.lower().startswith("pasal"):
-            continue
-        # Skip intro line like 'dalam peraturan desa ini yang dimaksud dengan :'
-        if "yang dimaksud dengan" in line_stripped:
-            continue
-        # Detect new definition: starts with 'N. term adalah ...'
-        import re
-        match = re.match(r'^(\d+)\.\s+(.+?)\s+adalah\s+(.*)', line_stripped)
-        if match:
-            # Save previous definition if any
-            if current_num:
-                definitions.append((current_num, current_term, current_def.strip()))
-            current_num = match.group(1)
-            current_term = match.group(2).strip()
-            current_def = match.group(3).strip()
-        elif current_num and line_stripped:
-            # Continuation of current definition
-            current_def += " " + line_stripped
-
-    # Save last definition
-    if current_num:
-        definitions.append((current_num, current_term, current_def.strip()))
-
-    return definitions
-
-
-def _extract_list_items(text: str) -> tuple:
-    """
-    Ekstrak list items dari konten pasal.
-    Return (intro_line, [(number, item_text), ...])
-    """
-    content = _strip_metadata_header(text)
-    lines = content.split("\n")
-    intro = ""
-    items = []
-    current_item = ""
-    current_num = ""
-
-    import re
-    for line in lines:
-        line_stripped = line.strip()
-        if line_stripped.lower().startswith("pasal"):
-            continue
-        # Detect list item: 'N. text' or 'N) text'
-        match = re.match(r'^(\d+)[.)]\s+(.*)', line_stripped)
-        if match:
-            if current_num:
-                items.append((current_num, current_item.strip()))
-            current_num = match.group(1)
-            current_item = match.group(2).strip()
-        elif current_num and line_stripped:
-            current_item += " " + line_stripped
-        elif not items and not current_num and line_stripped:
-            intro = line_stripped
-
-    if current_num:
-        items.append((current_num, current_item.strip()))
-
-    return intro, items
-
-
-def _synthesize_definition_answer(text: str, pasal: str) -> str:
-    """Buat jawaban sintetis untuk pasal definisi (pasal 1)."""
-    defs = _extract_definitions(text)
-    if not defs:
-        return _synthesize_general_answer(text, pasal)
-
-    if len(defs) == 1:
-        _, term, definition = defs[0]
-        return f"{term.capitalize()} adalah {definition}."
-    else:
-        parts = []
-        for num, term, definition in defs:
-            parts.append(f"({num}) {term.capitalize()} adalah {definition}")
-        return f"Pasal 1 mendefinisikan {len(defs)} istilah, yaitu: " + "; ".join(parts) + "."
-
-
-def _synthesize_list_answer(text: str, pasal: str) -> str:
-    """Buat jawaban sintetis untuk pasal berbentuk list."""
-    intro, items = _extract_list_items(text)
-    if not items:
-        return _synthesize_general_answer(text, pasal)
-
-    pasal_label = pasal.replace("pasal ", "Pasal ")
-    if intro:
-        result = f"{pasal_label} mengatur bahwa {intro.lower()} "
-    else:
-        result = f"{pasal_label} mengatur hal-hal berikut: "
-
-    item_texts = [f"({num}) {item}" for num, item in items]
-    result += "; ".join(item_texts) + "."
-    return result
-
-
-def _synthesize_general_answer(text: str, pasal: str) -> str:
-    """Buat jawaban sintetis umum dari konten pasal."""
-    content = _strip_metadata_header(text)
-    pasal_label = pasal.replace("pasal ", "Pasal ")
-
-    # Ambil inti konten (skip baris 'pasal X')
-    lines = [l.strip() for l in content.split("\n") if l.strip() and not l.strip().lower().startswith("pasal")]
-    if not lines:
-        return f"{pasal_label} tidak memuat ketentuan spesifik dalam potongan dokumen yang tersedia."
-
-    # Gabungkan menjadi kalimat ringkas (maks 3 kalimat)
-    core = " ".join(lines)
-    # Batasi panjang
-    if len(core) > 500:
-        # Potong di titik terakhir sebelum 500 karakter
-        last_period = core[:500].rfind(".")
-        if last_period > 100:
-            core = core[:last_period + 1]
-        else:
-            core = core[:500].rsplit(" ", 1)[0] + "."
-
-    return f"{pasal_label} mengatur bahwa {core[0].lower()}{core[1:]}"
-
-
-def generate_cot_answer(chunk: dict) -> tuple:
-    """
-    Generate (cot_answer, answer) dari oracle chunk.
-    Format: ##Reason: ... ##Answer: ...
-
-    Jawaban disintesis secara ringkas, BUKAN dump dokumen mentah.
-    """
-    pasal = get_pasal(chunk)
-    text = get_clean_text(chunk)
-
-    # Tentukan reason template
-    reason_templates = [
-        f"Informasi ditemukan pada {pasal} dari {TITLE}.",
-        f"Berdasarkan {TITLE}, pada bagian {pasal} disebutkan.",
-        f"Dari {TITLE} {pasal}, dapat diidentifikasi.",
-        f"Merujuk pada {pasal} dari {TITLE}.",
-        f"Dalam {TITLE}, {pasal} mengatur hal tersebut.",
+def generate_question(oracle_content: str, config: GeneratorConfig) -> str:
+    """Stage 2: Generate a question answerable from the oracle chunk content."""
+    snippet = oracle_content[:400]
+    system_prompt = (
+        "Anda adalah pembuat pertanyaan untuk dataset fine-tuning hukum. "
+        "Buat SATU pertanyaan spesifik dan menantang berdasarkan teks berikut. "
+        "Pertanyaan harus:\n"
+        "- Hanya bisa dijawab secara lengkap dari teks ini, bukan pertanyaan umum\n"
+        "- Menggunakan istilah atau konsep spesifik yang ada dalam teks\n"
+        "- Bukan pertanyaan ya/tidak sederhana\n"
+        "- Menggunakan bahasa Indonesia formal dan jelas\n"
+        "Jawab HANYA dengan satu pertanyaan, tanpa penjelasan tambahan."
+    )
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Teks sumber:\n{snippet}\n\nBuat satu pertanyaan spesifik:"},
     ]
-    reason = random.choice(reason_templates)
-
-    # Sintesis jawaban berdasarkan tipe konten
-    content = _strip_metadata_header(text)
-
-    if pasal == "pasal 1":
-        synthesized = _synthesize_definition_answer(text, pasal)
-    elif "meliputi" in content or "meliputi:" in content or "terdiri atas" in content:
-        synthesized = _synthesize_list_answer(text, pasal)
-    elif _extract_list_items(text)[1]:  # has numbered list items
-        synthesized = _synthesize_list_answer(text, pasal)
-    else:
-        synthesized = _synthesize_general_answer(text, pasal)
-
-    cot_answer = f"##Reason: {reason}\n##Answer: {synthesized}"
-    answer = synthesized
-
-    return cot_answer, answer
+    question = call_api(
+        messages, model=config.generator_model,
+        temperature=config.temperature_question, max_tokens=256, top_p=config.top_p,
+    )
+    time.sleep(config.request_delay)
+    return question
 
 
-# ============================================================================
-# Distractor selection
-# ============================================================================
+def select_distractors(
+    oracle_idx: int, all_chunks: List[Dict[str, Any]], num_distractors: int,
+) -> List[int]:
+    """Stage 3a: Pick random distractor chunk indices (excluding the oracle)."""
+    candidates = [i for i in range(len(all_chunks)) if i != oracle_idx]
+    return random.sample(candidates, min(num_distractors, len(candidates)))
 
-def select_distractors(chunks: list, exclude_idx: int, n: int = N_DISTRACTORS) -> list:
+
+def arrange_documents(
+    oracle_content: str, distractor_contents: List[str],
+) -> Tuple[List[str], int]:
+    """Stage 3b: Place oracle at a random position among distractors."""
+    docs = list(distractor_contents)
+    oracle_pos = random.randint(0, len(docs))
+    docs.insert(oracle_pos, oracle_content)
+    return docs, oracle_pos
+
+
+def generate_thought_process(
+    question: str, documents: List[str], oracle_pos: int, config: GeneratorConfig,
+) -> str:
+    """Stage 4: Generate chain-of-thought analyzing every document.
+
+    Marks irrelevant as '(Abaikan)', oracle as '(Sangat Relevan)'. Plain text output.
     """
-    Pilih N distractor chunks (bukan oracle).
-    Prioritas: pasal berbeda, lalu pasal sama tapi butir berbeda.
+    doc_text = "\n\n".join(f"Dokumen {i+1}:\n{doc}" for i, doc in enumerate(documents))
+    system_prompt = (
+        "Anda adalah asisten yang menganalisis dokumen untuk menjawab pertanyaan. "
+        "Analisis SETIAP dokumen secara berurutan:\n"
+        "- Untuk dokumen yang TIDAK relevan: tandai dengan '(Abaikan)' dan jelaskan singkat mengapa.\n"
+        "- Untuk dokumen yang PALING relevan: tandai dengan '(Sangat Relevan)' dan jelaskan bagaimana "
+        "dokumen tersebut menjawab pertanyaan.\n"
+        "- Untuk dokumen yang agak relevan: berikan analisis singkat.\n"
+        "Gunakan format teks biasa (bukan JSON)."
+    )
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Pertanyaan: {question}\n\n{doc_text}\n\n"
+                                     "Analisis setiap dokumen di atas."},
+    ]
+    thought = call_api(
+        messages, model=config.generator_model,
+        temperature=config.temperature_thought,
+        max_tokens=config.max_tokens, top_p=config.top_p,
+    )
+    time.sleep(config.request_delay)
+    return thought
+
+
+def generate_completion_with_style(
+    question: str,
+    documents: List[str],
+    config: GeneratorConfig,
+    style: Optional[str] = None,
+    feedback: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Stage 5: Generate completion using a specific style's tailored prompt.
+
+    Args:
+        question: The question to answer.
+        documents: Ordered document list.
+        config: Generator config.
+        style: Style name to use. If None, picks randomly.
+        feedback: Optional feedback string appended to user prompt (for repair phase).
+
+    Returns:
+        (completion_text, style_used)
     """
-    candidates = [i for i in range(len(chunks)) if i != exclude_idx]
-    if len(candidates) <= n:
-        return [chunks[i] for i in candidates]
+    if style is None:
+        style = random.choices(STYLE_NAMES, weights=STYLE_WEIGHTS, k=1)[0]
 
-    # Shuffle dan ambil n
-    random.shuffle(candidates)
+    style_info = STYLE_PROMPTS[style]
+    doc_text = "\n\n".join(f"Dokumen {i+1}:\n{doc}" for i, doc in enumerate(documents))
 
-    # Prioritaskan pasal berbeda
-    oracle_pasal = get_pasal(chunks[exclude_idx])
-    diff_pasal = [i for i in candidates if get_pasal(chunks[i]) != oracle_pasal]
-    same_pasal = [i for i in candidates if get_pasal(chunks[i]) == oracle_pasal]
+    user_content = f"{doc_text}\n\nPertanyaan: {question}\n\n{style_info['user_suffix']}"
+    if feedback:
+        user_content += f"\n\nCatatan perbaikan: {feedback}"
 
-    selected = []
-    # Ambil dari pasal berbeda dulu
-    for idx in diff_pasal[:n]:
-        selected.append(chunks[idx])
-
-    # Jika masih kurang, ambil dari pasal sama
-    for idx in same_pasal:
-        if len(selected) >= n:
-            break
-        selected.append(chunks[idx])
-
-    return selected[:n]
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": style_info["system"]},
+        {"role": "user", "content": user_content},
+    ]
+    completion = call_api(
+        messages, model=config.generator_model,
+        temperature=config.temperature_completion,
+        max_tokens=config.max_tokens, top_p=config.top_p,
+    )
+    time.sleep(config.request_delay)
+    return completion, style
 
 
-def select_no_oracle_distractors(chunks: list, n: int = N_DISTRACTORS) -> list:
-    """Pilih N distractor untuk no-oracle sample."""
-    indices = random.sample(range(len(chunks)), min(n, len(chunks)))
-    return [chunks[i] for i in indices]
+def generate_one_sample(
+    oracle_idx: int,
+    all_chunks: List[Dict[str, Any]],
+    config: GeneratorConfig,
+) -> Dict[str, Any]:
+    """Run the full generation pipeline for one oracle chunk (Phase 1, no retry)."""
+    oracle_content = clean_chunk_content(all_chunks[oracle_idx].get("content", ""))
 
+    question = generate_question(oracle_content, config)
 
-# ============================================================================
-# Sample builder
-# ============================================================================
+    distractor_idxs = select_distractors(oracle_idx, all_chunks, config.num_distractors)
+    distractor_contents = [
+        clean_chunk_content(all_chunks[i].get("content", "")) for i in distractor_idxs
+    ]
+    documents, oracle_pos = arrange_documents(oracle_content, distractor_contents)
 
-def make_doc_block(chunk: dict) -> str:
-    """Buat formatted document block dari chunk (raw content)."""
-    return get_clean_text(chunk)
+    thought_process = generate_thought_process(question, documents, oracle_pos, config)
 
+    completion, style_used = generate_completion_with_style(question, documents, config)
 
-def build_oracle_sample(chunk: dict, chunks: list, chunk_idx: int, sample_id: str) -> dict:
-    """
-    Bangun satu sampel RAFT dengan oracle document.
-
-    Struktur (Zhang et al., 2024):
-    {Q + D* + D1...Dk → A*}
-    - Q: pertanyaan
-    - D*: oracle document (gold)
-    - D1...Dk: distractor documents
-    - A*: jawaban dengan CoT
-    """
-    # Pilih distractors
-    distractors = select_distractors(chunks, chunk_idx)
-    distractor_ids = [d["metadata"]["chunk_index"] for d in distractors]
-
-    # Gold position: random 0..N_DISTRACTORS
-    gold_position = random.randint(0, N_DISTRACTORS)
-
-    # Bangun list dokumen: insert oracle di gold_position
-    distractor_blocks = [make_doc_block(d) for d in distractors]
-    oracle_block = make_doc_block(chunk)
-
-    all_doc_blocks = list(distractor_blocks)
-    all_doc_blocks.insert(gold_position, oracle_block)
-
-    # Bangun context array (raw text) dari chunk objects
-    all_chunks_ordered = list(distractors)
-    all_chunks_ordered.insert(gold_position, chunk)
-    context_array = [get_clean_text(c) for c in all_chunks_ordered]
-
-    # Bangun instruction
-    context_block = build_context_block(all_doc_blocks)
-    instruction = f"{SYSTEM_PROMPT_ORACLE}\n\n{context_block}"
-
-    # Generate question & answer
-    question = generate_question(chunk)
-    cot_answer, answer = generate_cot_answer(chunk)
+    context = "\n\n".join(f"Dokumen {i+1}:\n{doc}" for i, doc in enumerate(documents))
 
     return {
-        "id": sample_id,
-        "instruction": instruction,
-        "question": question,
-        "cot_answer": cot_answer,
-        "answer": answer,
-        "context": context_array,
-        "oracle_context": get_clean_text(chunk),
-        "metadata": {
-            "gold_doc_id": f"chunk_{chunk['metadata']['chunk_index']}",
-            "has_oracle": True,
-            "gold_position": gold_position,
-            "distractor_ids": [f"chunk_{did}" for did in distractor_ids],
-            "n_distractors": N_DISTRACTORS,
-            "village_name": VILLAGE,
-            "title": TITLE,
-            "section": get_pasal(chunk),
-            "generated_by": "raft_generator",
-            "created_at": datetime.now().isoformat(),
-        },
+        "instruction": question,
+        "input": context,
+        "output": completion,
+        "thought_process": thought_process,
+        "oracle_index": oracle_idx,
+        "oracle_position": oracle_pos,
+        "style_used": style_used,
     }
 
 
-def build_no_oracle_sample(chunks: list, sample_id: str, target_pasal: str = None) -> dict:
-    """
-    Bangun sampel tanpa oracle document.
-    Zhang et al. (2024): (1-P)% data tanpa oracle untuk memorization training.
-    """
-    # Pilih distractors
-    distractors = select_no_oracle_distractors(chunks, N_DISTRACTORS)
-    distractor_ids = [d["metadata"]["chunk_index"] for d in distractors]
+def run_generation(config: GeneratorConfig) -> List[Dict[str, Any]]:
+    """Phase 1: Generate all samples with random styles, no retry/repair."""
+    random.seed(config.seed)
+    chunks = load_all_chunks(CHUNKS_FILE)
 
-    # Semua dokumen adalah distractor
-    all_doc_blocks = [make_doc_block(d) for d in distractors]
-
-    # Bangun instruction (pakai prompt no-oracle)
-    context_block = build_context_block(all_doc_blocks)
-    instruction = f"{SYSTEM_PROMPT_NO_ORACLE}\n\n{context_block}"
-
-    # Pertanyaan tentang pasal yang TIDAK ada di konteks
-    if target_pasal:
-        question = f"Apa isi dari {target_pasal} dalam {TITLE}?"
+    if config.chunks_per_doc is not None:
+        indices = random.sample(range(len(chunks)), min(config.chunks_per_doc, len(chunks)))
     else:
-        # Cari pasal yang tidak ada di distractors
-        used_pasals = set(get_pasal(d) for d in distractors)
-        all_pasals = ["pasal 1", "pasal 2", "pasal 3", "pasal 4", "pasal 5", "pasal 6"]
-        missing = [p for p in all_pasals if p not in used_pasals]
-        target = random.choice(missing) if missing else "pasal 3"
-        question = f"Apa isi dari {target} dalam {TITLE}?"
+        indices = list(range(len(chunks)))
 
-    context_array = [get_clean_text(d) for d in distractors]
+    print(f"[Phase 1] Generating {len(indices)} samples...")
 
-    return {
-        "id": sample_id,
-        "instruction": instruction,
-        "question": question,
-        "cot_answer": NO_ORACLE_COT,
-        "answer": NO_ORACLE_ANSWER,
-        "context": context_array,
-        "oracle_context": "",
-        "metadata": {
-            "gold_doc_id": None,
-            "has_oracle": False,
-            "gold_position": None,
-            "distractor_ids": [f"chunk_{did}" for did in distractor_ids],
-            "n_distractors": N_DISTRACTORS,
-            "village_name": VILLAGE,
-            "title": TITLE,
-            "section": "N/A",
-            "generated_by": "raft_generator",
-            "created_at": datetime.now().isoformat(),
-        },
-    }
-
-
-# ============================================================================
-# Main generation
-# ============================================================================
-
-def generate_dataset(chunks: list) -> list:
-    """Generate dataset RAFT lengkap dari chunks."""
-    samples = []
-    sample_idx = 0
-
-    # Filter chunks yang layak jadi oracle
-    usable_chunks = [
-        (i, c) for i, c in enumerate(chunks)
-        if len(get_clean_text(c)) >= MIN_CONTENT_CHARS
-    ]
-
-    print(f"  Total chunks        : {len(chunks)}")
-    print(f"  Chunks usable       : {len(usable_chunks)} (>= {MIN_CONTENT_CHARS} chars)")
-
-    # Hitung target no-oracle
-    n_oracle = len(usable_chunks)
-    n_no_oracle = max(1, int(n_oracle * (1 - P_ORACLE) / P_ORACLE))
-    n_total = n_oracle + n_no_oracle
-
-    print(f"  Target oracle       : {n_oracle} ({P_ORACLE*100:.0f}%)")
-    print(f"  Target no-oracle    : {n_no_oracle} ({(1-P_ORACLE)*100:.0f}%)")
-    print(f"  Target total        : {n_total}")
-    print()
-
-    # Generate oracle samples
-    print("[1/2] Generating oracle samples...")
-    for idx, chunk in usable_chunks:
-        sample_id = f"sample_{sample_idx:05d}"
-        sample = build_oracle_sample(chunk, chunks, idx, sample_id)
-        samples.append(sample)
-        sample_idx += 1
-
-    print(f"  Generated: {len(samples)} oracle samples")
-
-    # Generate no-oracle samples
-    print("[2/2] Generating no-oracle samples...")
-    # Pilih pasal target yang beragam
-    no_oracle_pasals = ["pasal 3", "pasal 5", "pasal 1", "pasal 6", "pasal 4",
-                        "pasal 2", "pasal 6", "pasal 1", "pasal 3", "pasal 5"]
-    for i in range(n_no_oracle):
-        sample_id = f"sample_{sample_idx:05d}"
-        target = no_oracle_pasals[i % len(no_oracle_pasals)]
-        sample = build_no_oracle_sample(chunks, sample_id, target)
-        samples.append(sample)
-        sample_idx += 1
-
-    print(f"  Generated: {n_no_oracle} no-oracle samples")
-    print(f"\n  TOTAL: {len(samples)} samples")
+    samples: List[Dict[str, Any]] = []
+    for idx in tqdm(indices, desc="Phase 1: Generating"):
+        try:
+            sample = generate_one_sample(idx, chunks, config)
+            samples.append(sample)
+        except Exception as e:
+            print(f"\n  [!] Failed for chunk {idx}: {e}")
+            continue
 
     return samples
 
 
-def print_statistics(samples: list):
-    """Cetak statistik dataset."""
-    n_total = len(samples)
-    n_oracle = sum(1 for s in samples if s["metadata"]["has_oracle"])
-    n_no_oracle = n_total - n_oracle
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE 2 — VALIDATION & REPAIR
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    gold_positions = Counter(
-        s["metadata"]["gold_position"]
-        for s in samples
-        if s["metadata"]["has_oracle"]
+# ─── Validation helpers ───────────────────────────────────────────────────────
+
+def _word_set(text: str) -> Set[str]:
+    """Lowercase word set for set-based comparisons."""
+    return set(re.findall(r"\w+", text.lower()))
+
+
+def validate_completion(
+    completion: str,
+    instruction: str,
+    oracle_content: str,
+    recent_completions: List[str],
+) -> Tuple[bool, List[str]]:
+    """Validate a generated completion against quality criteria.
+
+    Returns (is_valid, list_of_failed_check_names).
+    Checks: min_length, no_doc_reference, has_specific_fact, not_formulaic, anti_monotony.
+    """
+    failed: List[str] = []
+
+    # min_length
+    if len(completion) < 80:
+        failed.append("min_length")
+
+    # no_doc_reference
+    if re.search(r"[Dd]okumen\s+\d", completion):
+        failed.append("no_doc_reference")
+
+    # has_specific_fact — overlap of key terms/numbers with oracle
+    oracle_key = {w for w in _word_set(oracle_content) if len(w) >= 4}
+    completion_words = _word_set(completion)
+    overlap = completion_words & oracle_key
+    oracle_nums = set(re.findall(r"\d+", oracle_content))
+    completion_nums = set(re.findall(r"\d+", completion))
+    if len(overlap) < 2 and len(oracle_nums & completion_nums) < 1:
+        failed.append("has_specific_fact")
+
+    # not_formulaic — rigid template as ENTIRE completion
+    if re.match(
+        r"^.+,\s*sesuai dengan ketentuan dalam Pasal \d+ Peraturan Desa .+ No\.\s*\d+ Tahun \d+\.?$",
+        completion,
+    ):
+        failed.append("not_formulaic")
+
+    # anti_monotony — Jaccard similarity against recent completions
+    if recent_completions:
+        new_words = _word_set(completion)
+        for prev in recent_completions:
+            prev_words = _word_set(prev)
+            union = new_words | prev_words
+            if not union:
+                continue
+            jaccard = len(new_words & prev_words) / len(union)
+            if jaccard > 0.7:
+                failed.append("anti_monotony")
+                break
+
+    return (len(failed) == 0, failed)
+
+
+def _extract_oracle_content(sample: Dict[str, Any]) -> str:
+    """Extract oracle document text from a sample's 'input' field."""
+    oracle_pos = sample.get("oracle_position", 0)
+    # Parse documents from the context string
+    parts = re.split(r"Dokumen \d+:\n", sample.get("input", ""))
+    # parts[0] is empty, parts[1..n] are doc contents
+    docs = [p.strip() for p in parts[1:]]
+    if 0 <= oracle_pos < len(docs):
+        return docs[oracle_pos]
+    return ""
+
+
+def _build_feedback(failed_checks: List[str]) -> str:
+    """Build human-readable feedback string from failed check names."""
+    feedback_parts = []
+    if "min_length" in failed_checks:
+        feedback_parts.append("jawaban terlalu pendek (minimal 80 karakter)")
+    if "no_doc_reference" in failed_checks:
+        feedback_parts.append(
+            "jangan menyebut 'Dokumen 1/2/3', gunakan nomor Pasal atau 'Peraturan Desa'"
+        )
+    if "has_specific_fact" in failed_checks:
+        feedback_parts.append(
+            "sertakan fakta spesifik (angka, nama jabatan, istilah) dari dokumen sumber"
+        )
+    if "not_formulaic" in failed_checks:
+        feedback_parts.append("jangan gunakan format kaku/berulang, buat lebih natural")
+    if "anti_monotony" in failed_checks:
+        feedback_parts.append(
+            "jawaban terlalu mirip dengan jawaban sebelumnya, gunakan gaya dan variasi kata yang berbeda"
+        )
+    return (
+        "Jawaban sebelumnya tidak memenuhi kriteria: "
+        + "; ".join(feedback_parts)
+        + ". Perbaiki."
     )
 
-    sections = Counter(
-        s["metadata"]["section"]
-        for s in samples
-        if s["metadata"]["has_oracle"]
+
+def repair_sample(
+    sample: Dict[str, Any],
+    failed_checks: List[str],
+    config: GeneratorConfig,
+    recent_completions: List[str],
+) -> Optional[Dict[str, Any]]:
+    """Attempt to repair a failed sample by regenerating completion with a different style.
+
+    Picks a style DIFFERENT from the original, includes feedback in the prompt.
+    Validates the new completion. Returns repaired sample or None if still failing.
+    """
+    original_style = sample.get("style_used", "direct")
+    # Use weighted random style (different from original if possible)
+    other_styles = [s for s in STYLE_NAMES if s != original_style]
+    other_weights = [STYLE_WEIGHTS[STYLE_NAMES.index(s)] for s in other_styles]
+    if not other_styles:
+        return None
+
+    new_style = random.choices(other_styles, weights=other_weights, k=1)[0]
+    feedback = _build_feedback(failed_checks)
+
+    # Re-parse documents and question from the sample
+    question = sample["instruction"]
+    parts = re.split(r"Dokumen \d+:\n", sample.get("input", ""))
+    documents = [p.strip() for p in parts[1:] if p.strip()]
+    oracle_content = _extract_oracle_content(sample)
+
+    if not documents:
+        return None
+
+    # Regenerate completion with different style + feedback
+    new_completion, style_used = generate_completion_with_style(
+        question, documents, config, style=new_style, feedback=feedback,
     )
 
-    print(f"\n{'='*60}")
-    print("STATISTIK DATASET RAFT")
-    print(f"{'='*60}")
-    print(f"  Total sampel        : {n_total}")
-    print(f"  Dengan oracle (P%)  : {n_oracle} ({100*n_oracle/n_total:.1f}%)")
-    print(f"  Tanpa oracle (1-P)% : {n_no_oracle} ({100*n_no_oracle/n_total:.1f}%)")
-    print(f"  Distractors/sample  : {N_DISTRACTORS}")
+    # Validate the new completion
+    is_valid, new_failed = validate_completion(
+        new_completion, question, oracle_content, recent_completions,
+    )
+
+    if not is_valid:
+        return None
+
+    # Build repaired sample (keep original question, thought, context)
+    repaired = dict(sample)
+    repaired["output"] = new_completion
+    repaired["style_used"] = style_used
+    repaired["repaired"] = True
+    return repaired
+
+
+def run_validation_and_repair(
+    samples: List[Dict[str, Any]], config: GeneratorConfig,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Phase 2: Scan all samples, validate, repair failures.
+
+    Returns (valid_samples, repaired_samples).
+    Final dataset = valid_samples + repaired_samples.
+    """
+    print(f"\n[Phase 2] Validating {len(samples)} samples...")
+
+    valid: List[Dict[str, Any]] = []
+    repaired: List[Dict[str, Any]] = []
+    failed_unrecoverable: List[Dict[str, Any]] = []
+
+    # Build rolling window of recent completions (kept for API compatibility)
+    recent_completions: List[str] = []
+    _recent_completions.clear()  # Reset shared deque for fresh run
+
+    for i, sample in enumerate(tqdm(samples, desc="Phase 2: Validating")):
+        oracle_content = _extract_oracle_content(sample)
+        is_valid, failed_checks = validate_completion(
+            sample["output"], sample["instruction"], oracle_content,
+            recent_completions[-5:],
+        )
+
+        if is_valid:
+            valid.append(sample)
+            recent_completions.append(sample["output"])
+            _recent_completions.append(sample["output"])
+        else:
+            # Try to repair
+            fixed = repair_sample(sample, failed_checks, config, recent_completions[-5:])
+            if fixed is not None:
+                repaired.append(fixed)
+                recent_completions.append(fixed["output"])
+                _recent_completions.append(fixed["output"])
+                print(f"  [Repaired] sample {i}: style={sample.get('style_used')} -> {fixed.get('style_used')}, failed={failed_checks}")
+            else:
+                failed_unrecoverable.append(sample)
+                print(f"  [Failed]   sample {i}: checks={failed_checks}, could not repair")
+
+    print(f"\nPhase 2 summary: {len(valid)} valid, {len(repaired)} repaired, "
+          f"{len(failed_unrecoverable)} unrecoverable")
+    return valid, repaired
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  OUTPUT & STATS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def print_stats(samples: List[Dict[str, Any]], label: str = "Dataset") -> None:
+    """Print dataset statistics and 2 sample outputs."""
+    if not samples:
+        print(f"[{label}] No samples.")
+        return
+    n = len(samples)
+    avg_q = sum(len(s["instruction"]) for s in samples) / n
+    avg_c = sum(len(s["output"]) for s in samples) / n
+    avg_t = sum(len(s["thought_process"]) for s in samples) / n
+    min_c = min(len(s["output"]) for s in samples)
+    max_c = max(len(s["output"]) for s in samples)
+
+    # Style distribution
+    style_counts: Dict[str, int] = {}
+    for s in samples:
+        st = s.get("style_used", "unknown")
+        style_counts[st] = style_counts.get(st, 0) + 1
+
+    print(f"\n{'='*50}")
+    print(f"[{label}]")
+    print(f"Total samples  : {n}")
+    print(f"Avg question   : {avg_q:.0f} chars")
+    print(f"Avg completion : {avg_c:.0f} chars (min={min_c}, max={max_c})")
+    print(f"Avg thought    : {avg_t:.0f} chars")
+    print(f"{'='*50}")
+
+    # Style variation report
+    print(f"\n  Style variation report:")
+    for style_name in STYLE_NAMES:
+        count = style_counts.get(style_name, 0)
+        pct = count / n * 100
+        bar = "█" * int(pct / 2)
+        print(f"    {style_name:<12} : {count:>4} ({pct:5.1f}%) {bar}")
+    repaired_count = sum(1 for s in samples if s.get("repaired"))
+    print(f"    Repaired       : {repaired_count:>4} ({repaired_count / n * 100:5.1f}%)")
+
+    for i, idx in enumerate([0, -1] if n > 1 else [0]):
+        s = samples[idx]
+        print(f"\n--- Sample {i+1} ---")
+        print(f"Q: {s['instruction']}")
+        print(f"A: {s['output'][:300]}...")
+        if s.get("repaired"):
+            print(f"   (repaired, style={s.get('style_used')})")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    """Main entry point: Phase 1 (generate) -> Phase 2 (validate+repair) -> merge -> write."""
+    config = GeneratorConfig()
+    random.seed(config.seed)
+
+    print("=" * 50)
+    print("RAFT Dataset Generator (Two-Phase)")
+    print("=" * 50)
+    print(f"Model       : {config.generator_model}")
+    print(f"Chunks file : {CHUNKS_FILE}")
+    print(f"Output      : {OUTPUT_FILE}")
+    print(f"Repaired    : {REPAIRED_FILE}")
+    print(f"Samples     : {config.chunks_per_doc or 'all'}")
+    print(f"Styles      : {', '.join(STYLE_NAMES)} (weighted: {dict(zip(STYLE_NAMES, STYLE_WEIGHTS))})")
     print()
-    print(f"  Distribusi gold position:")
-    for pos in sorted(gold_positions.keys()):
-        print(f"    Position {pos}: {gold_positions[pos]} samples")
-    print()
-    print(f"  Distribusi pasal (oracle):")
-    for sec, count in sections.most_common():
-        print(f"    {sec}: {count} samples")
-    print()
 
-    # Average content lengths
-    oracle_contents = [
-        len(s["oracle_context"])
-        for s in samples if s["metadata"]["has_oracle"]
-    ]
-    if oracle_contents:
-        print(f"  Oracle content length:")
-        print(f"    Min  : {min(oracle_contents)} chars")
-        print(f"    Max  : {max(oracle_contents)} chars")
-        print(f"    Mean : {sum(oracle_contents)/len(oracle_contents):.0f} chars")
-
-    print(f"{'='*60}")
-
-
-def save_dataset(samples: list, path: str):
-    """Simpan dataset ke JSONL."""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for sample in samples:
-            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-    print(f"\nDataset disimpan ke: {path}")
-    print(f"  Format : JSONL (satu JSON object per baris)")
-    print(f"  Size   : {os.path.getsize(path) / 1024:.1f} KB")
-
-
-def print_preview(samples: list, n: int = 3):
-    """Print preview N sampel pertama."""
-    print(f"\n{'='*60}")
-    print(f"PREVIEW ({n} sampel pertama)")
-    print(f"{'='*60}")
-
-    for s in samples[:n]:
-        print(f"\n--- {s['id']} ---")
-        print(f"  Oracle     : {s['metadata']['has_oracle']}")
-        print(f"  Gold pos   : {s['metadata']['gold_position']}")
-        print(f"  Section    : {s['metadata']['section']}")
-        print(f"  Question   : {s['question']}")
-        print(f"  CoT Answer : {s['cot_answer'][:150]}...")
-        print(f"  Docs       : {len(s['context'])} dokumen")
-        if s["metadata"]["has_oracle"]:
-            print(f"  Oracle ctx : {s['oracle_context'][:100]}...")
-
-
-# ============================================================================
-# Entry point
-# ============================================================================
-
-def main():
-    print("=" * 60)
-    print("RAFT DATASET GENERATOR")
-    print("Zhang et al. (2024) - Adapting Language Model to Domain RAG")
-    print("=" * 60)
-
-    # Load chunks
-    print(f"\nLoading chunks dari: {CHUNKS_PATH}")
-    if not os.path.exists(CHUNKS_PATH):
-        print(f"[ERROR] File tidak ditemukan: {CHUNKS_PATH}")
-        print("Pastikan script dijalankan dari folder notebooks/")
+    # Test API connection
+    print("Testing API connection...")
+    try:
+        result = call_api(
+            [{"role": "user", "content": "Say 'OK' in one word."}],
+            model=config.generator_model, temperature=0.0, max_tokens=5, max_attempts=2,
+        )
+        print(f"  API OK: '{result}'")
+    except Exception as e:
+        print(f"  API test FAILED: {e}")
         return
 
-    chunks = load_chunks(CHUNKS_PATH)
-    print(f"  Loaded {len(chunks)} chunks")
+    # Backup existing output
+    if OUTPUT_FILE.exists():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = OUTPUT_FILE.with_suffix(f".jsonl.bak_{ts}")
+        shutil.copy2(OUTPUT_FILE, backup)
+        print(f"Backed up existing output to {backup.name}")
 
-    # Generate dataset
-    print(f"\nGenerating RAFT dataset...")
-    samples = generate_dataset(chunks)
+    # ── Phase 1: Generate all samples ────────────────────────────────────────
+    raw_samples = run_generation(config)
+    # Write raw output (before repair)
+    write_jsonl(raw_samples, OUTPUT_FILE)
+    print_stats(raw_samples, label="Phase 1 — Raw")
 
-    # Print statistics
-    print_statistics(samples)
+    # ── Phase 2: Validate & Repair ───────────────────────────────────────────
+    valid, repaired = run_validation_and_repair(raw_samples, config)
 
-    # Save
-    save_dataset(samples, OUTPUT_PATH)
+    # Write repaired-only file
+    if repaired:
+        write_jsonl(repaired, REPAIRED_FILE)
 
-    # Preview
-    print_preview(samples, n=3)
-
-    print(f"\n{'='*60}")
-    print("SELESAI!")
-    print(f"  Output  : {OUTPUT_PATH}")
-    print(f"  Samples : {len(samples)}")
-    print(f"  Format  : JSONL (siap untuk fine-tuning)")
-    print(f"{'='*60}")
+    # ── Final dataset: merge valid + repaired ────────────────────────────────
+    final = valid + repaired
+    write_jsonl(final, OUTPUT_FILE)
+    print_stats(final, label="Final Dataset")
 
 
 if __name__ == "__main__":
