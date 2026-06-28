@@ -1,49 +1,20 @@
 """
-llama_service.py
-================
-Service layer untuk model LLaMA 3.1 8B Instruct.
+LlamaService - Thread-safe singleton for RAFT model inference.
 
-Menangani:
-  - Load model (base / fine-tuned RAFT / fine-tuned Q&A)
-  - Generate jawaban tanpa konteks (plain chat)
-  - Generate jawaban dengan konteks RAG (chat-rag, format RAFT)
-  - Info model yang sedang aktif
-
-PENTING: System prompt saat inference HARUS SAMA PERSIS dengan yang dipakai
-saat training (fine-tuning). Mismatch akan menyebabkan model bingung dan
-menghasilkan jawaban yang tidak relevan.
+Handles model loading, text generation (plain chat and RAG/RAFT mode),
+Chain-of-Thought parsing, and answer enrichment.
 """
 
-import os
-import re
-import logging
+import threading
 import traceback
 import torch
-from typing import Optional
+import re
+import logging
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# Konfigurasi Path Model
-# ============================================================================
-BASE_MODEL_NAME = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "model", "Meta-Llama-3.1-8B-Instruct")
-)
-
-# Path model fine-tuned (relatif terhadap file ini)
-_NOTEBOOKS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "notebooks"))
-
-MODEL_PATHS = [
-    os.path.join(_NOTEBOOKS_DIR, "model_merged_raft_perdes"),   # RAFT fine-tuned
-    os.path.join(_NOTEBOOKS_DIR, "model_merged_perdes"),         # Q&A fine-tuned
-]
-
-# ============================================================================
-# System Prompts (HARUS SAMA PERSIS dengan training)
-# ============================================================================
-
-# System prompt untuk model RAFT (fine-tuned dengan dokumen konteks)
-# Digunakan di /api/chat-rag
+# System prompt - MUST match training exactly
 RAFT_SYSTEM_PROMPT = (
     "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
     "Peraturan Desa (Perdes) di Indonesia. Jawab pertanyaan berdasarkan "
@@ -51,351 +22,355 @@ RAFT_SYSTEM_PROMPT = (
     "pertanyaan, jadi pilihlah informasi dari dokumen yang paling sesuai."
 )
 
-# System prompt untuk model base / Q&A (tanpa dokumen konteks)
-# Digunakan di /api/chat
-PLAIN_SYSTEM_PROMPT = (
-    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
-    "Peraturan Desa (Perdes) di Indonesia. Jawab dengan jelas dan lengkap "
-    "berdasarkan pengetahuan Anda."
-)
 
-# ============================================================================
-# Global State
-# ============================================================================
-_model = None
-_tokenizer = None
-_model_path = None
-_model_type = None  # "base", "raft", "qa"
-
-
-def _detect_model_type(path: str) -> str:
-    """Deteksi tipe model berdasarkan nama path."""
-    basename = os.path.basename(os.path.abspath(path))
-    if "raft" in basename.lower():
-        return "raft"
-    elif "perdes" in basename.lower() or "merged" in basename.lower():
-        return "qa"
-    elif "Llama" in basename or "base" in basename.lower():
-        return "base"
-    return "unknown"
-
-
-def _resolve_model_path(requested_path: Optional[str] = None) -> str:
+class LlamaService:
     """
-    Resolve path model yang akan di-load.
-    Priority:
-      1. requested_path (jika diberikan dan valid)
-      2. Model fine-tuned pertama yang ditemukan (MODEL_PATHS)
-      3. Base model (fallback)
+    Thread-safe singleton service for Llama model inference.
+    Supports both plain chat and RAFT (Retrieval-Augmented Fine-Tuning) modes.
     """
-    if requested_path:
-        abs_path = os.path.abspath(requested_path)
-        if os.path.isdir(abs_path):
-            return abs_path
-        logger.warning(f"Path tidak ditemukan: {abs_path}, mencoba fallback...")
 
-    # Coba model fine-tuned dulu
-    for path in MODEL_PATHS:
-        if os.path.isdir(path):
-            logger.info(f"Model fine-tuned ditemukan: {path}")
-            return path
+    _instance = None
+    _lock = threading.Lock()
 
-    # Fallback ke base model
-    if os.path.isdir(BASE_MODEL_NAME):
-        logger.info(f"Menggunakan base model: {BASE_MODEL_NAME}")
-        return BASE_MODEL_NAME
+    def __init__(self):
+        """Initialize service with empty model state."""
+        self.model = None
+        self.tokenizer = None
+        self.model_path = None
+        self.model_type = None
+        self._instance_lock = threading.Lock()
 
-    raise FileNotFoundError(
-        f"Tidak ada model yang ditemukan! "
-        f"Fine-tuned paths: {MODEL_PATHS}, Base: {BASE_MODEL_NAME}"
-    )
+    @classmethod
+    def get_instance(cls):
+        """
+        Get or create the singleton instance (thread-safe).
+        
+        Returns:
+            LlamaService: The singleton instance.
+        """
+        if cls._instance is None:
+            with cls._lock:
+                # Double-check locking pattern
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
 
+    def load_model(self, model_path: str):
+        """
+        Load model and tokenizer from the specified path.
 
-def load_model(requested_path: Optional[str] = None):
-    """
-    Load model dan tokenizer ke GPU.
-    Menggunakan Unsloth FastLanguageModel untuk inference yang efisien.
-    """
-    global _model, _tokenizer, _model_path, _model_type
+        Args:
+            model_path: Path to the model directory.
 
-    from unsloth import FastLanguageModel
+        Raises:
+            RuntimeError: If model loading fails.
+        """
+        try:
+            logger.info(f"Loading model from: {model_path}")
 
-    path = _resolve_model_path(requested_path)
-    model_type = _detect_model_type(path)
+            # Load model with automatic device placement
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.float16,
+                device_map="auto"
+            )
 
-    logger.info(f"Loading model dari: {path} (tipe: {model_type})")
+            # Load tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=path,
-        max_seq_length=2048,
-        dtype=None,
-        load_in_4bit=True,
-        device_map="auto",
-    )
+            # Set pad token if not already set
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    # Set ke inference mode
-    FastLanguageModel.for_inference(model)
+            # Store model metadata
+            self.model_path = model_path
+            self.model_type = "raft" if "raft" in model_path.lower() else "base"
 
-    _model = model
-    _tokenizer = tokenizer
-    _model_path = path
-    _model_type = model_type
+            # Log GPU memory usage
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+                reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+                logger.info(f"GPU memory allocated: {allocated:.2f} GB")
+                logger.info(f"GPU memory reserved: {reserved:.2f} GB")
 
-    logger.info(f"Model berhasil di-load: {path}")
+            logger.info(f"Model loaded successfully. Type: {self.model_type}")
 
+        except Exception as e:
+            logger.error(f"Failed to load model from {model_path}: {e}")
+            # Reset state on failure
+            self.model = None
+            self.tokenizer = None
+            self.model_path = None
+            self.model_type = None
+            raise RuntimeError(f"Failed to load model: {e}")
 
-def _ensure_model_loaded():
-    """Pastikan model sudah di-load. Auto-load jika belum."""
-    global _model, _tokenizer
-    if _model is None or _tokenizer is None:
-        logger.info("Model belum di-load, auto-loading...")
-        load_model()
+    def generate_answer(
+        self,
+        pertanyaan: str,
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9
+    ) -> dict:
+        """
+        Generate answer in plain chat mode (no documents).
 
+        Args:
+            pertanyaan: The user's question.
+            max_new_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling top_p.
 
-def _format_rag_context(dokumen: list) -> str:
-    """
-    Format list dokumen menjadi string konteks RAFT.
-    Format harus SAMA PERSIS dengan training data.
-    """
-    docs_text = ""
-    for idx, doc in enumerate(dokumen, 1):
-        docs_text += f"\n\nDokumen {idx}:\n{doc}"
-    return docs_text
+        Returns:
+            dict: Contains raw_response and model_type, or error info.
+        """
+        try:
+            # Build conversation messages
+            messages = [
+                {"role": "system", "content": RAFT_SYSTEM_PROMPT},
+                {"role": "user", "content": pertanyaan}
+            ]
 
+            # Tokenize using chat template
+            input_ids = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            ).to(self.model.device)
 
-def generate_answer(pertanyaan: str, max_new_tokens: int = 512,
-                    temperature: float = 0.1, top_p: float = 0.9,
-                    repetition_penalty: float = 1.1) -> dict:
-    """
-    Generate jawaban TANPA konteks dokumen (plain chat).
-    Cocok untuk model base atau model Q&A sederhana.
+            # Track prompt length for decoding only new tokens
+            prompt_length = input_ids.shape[-1]
 
-    Args:
-        pertanyaan: Pertanyaan user
-        max_new_tokens: Jumlah maksimal token yang di-generate
-        temperature: Suhu sampling (lebih rendah = lebih deterministik)
-        top_p: Top-p (nucleus) sampling
-        repetition_penalty: Penalty untuk repetisi
+            # Generate response
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    input_ids,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=True,
+                    top_k=50,
+                    repetition_penalty=1.15,
+                    use_cache=True,
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
 
-    Returns:
-        dict dengan key: answer, model_type, model_path
-    """
-    _ensure_model_loaded()
+            # Decode only the generated tokens (skip prompt)
+            generated_tokens = output_ids[0][prompt_length:]
+            decoded_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
-    messages = [
-        {"role": "system", "content": PLAIN_SYSTEM_PROMPT},
-        {"role": "user", "content": pertanyaan},
-    ]
+            return {
+                "raw_response": decoded_text.strip(),
+                "model_type": self.model_type
+            }
 
-    input_ids = _tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-    ).to("cuda")
+        except Exception as e:
+            logger.error(f"Error in generate_answer: {type(e).__name__}: {e}")
+            logger.error(traceback.format_exc())
+            return {
+                "raw_response": "",
+                "model_type": self.model_type,
+                "error": f"{type(e).__name__}: {e}" or repr(e)
+            }
 
-    output_ids = _model.generate(
-        input_ids,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        do_sample=True,
-        top_p=top_p,
-        repetition_penalty=repetition_penalty,
-    )
+    def generate_answer_rag(
+        self,
+        pertanyaan: str,
+        dokumen: list,
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9
+    ) -> dict:
+        """
+        Generate answer in RAG/RAFT mode with document context.
 
-    response = _tokenizer.decode(
-        output_ids[0][input_ids.shape[1]:],
-        skip_special_tokens=True,
-    )
+        Args:
+            pertanyaan: The user's question.
+            dokumen: List of document strings.
+            max_new_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling top_p.
 
-    return {
-        "answer": response.strip(),
-        "model_type": _model_type,
-        "model_path": _model_path,
-    }
+        Returns:
+            dict: Contains analisis, jawaban, raw_response, model_type, num_documents.
+        """
+        try:
+            # Format documents for input
+            formatted_docs = self._format_documents(dokumen)
 
+            # Build user message with question and documents
+            user_message = f"{pertanyaan}{formatted_docs}"
 
-def _split_cot_answer(raw_response: str) -> tuple:
-    """
-    Pisahkan Chain-of-Thought (analisis) dari jawaban akhir.
-    Model RAFT menghasilkan: {analisis/CoT}\n\n{jawaban}
-    Returns: tuple (analisis, jawaban)
-    """
-    text = raw_response.strip()
-    separator = "\n\n"
-    last_sep_idx = text.rfind(separator)
+            # Build conversation messages
+            messages = [
+                {"role": "system", "content": RAFT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message}
+            ]
 
-    if last_sep_idx == -1:
-        return "", text
+            # Tokenize using chat template
+            input_ids = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            ).to(self.model.device)
 
-    analisis = text[:last_sep_idx].strip()
-    jawaban = text[last_sep_idx + len(separator):].strip()
+            # Track prompt length for decoding only new tokens
+            prompt_length = input_ids.shape[-1]
 
-    # Validasi: kalau jawaban terlalu pendek, coba separator sebelumnya
-    if len(jawaban) < 10:
-        second_last = text.rfind(separator, 0, last_sep_idx)
-        if second_last != -1:
-            kandidat = text[second_last + len(separator):].strip()
-            if len(kandidat) > len(jawaban):
-                analisis = text[:second_last].strip()
-                jawaban = kandidat
+            # Generate response
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    input_ids,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=True,
+                    top_k=50,
+                    repetition_penalty=1.15,
+                    use_cache=True,
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
 
-    return analisis, jawaban
+            # Decode only the generated tokens (skip prompt)
+            generated_tokens = output_ids[0][prompt_length:]
+            raw_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
+            # Parse Chain-of-Thought and answer
+            analisis, jawaban = self._split_cot_answer(raw_text)
 
-def _extract_doc_number(analisis: str) -> Optional[int]:
-    """Ekstrak nomor dokumen relevan dari analisis CoT."""
-    patterns = [
-        r"[Dd]okumen\s+(\d+)\s+.*?[Rr]elevan",
-        r"[Dd]okumen\s+(\d+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, analisis)
+            # Enrich/clean the answer
+            jawaban = self._enrich_jawaban(jawaban)
+
+            return {
+                "analisis": analisis,
+                "jawaban": jawaban,
+                "raw_response": raw_text.strip(),
+                "model_type": "raft",
+                "num_documents": len(dokumen)
+            }
+
+        except Exception as e:
+            logger.error(f"Error in generate_answer_rag: {type(e).__name__}: {e}")
+            logger.error(traceback.format_exc())
+            return {
+                "analisis": "",
+                "jawaban": "",
+                "raw_response": "",
+                "model_type": "raft",
+                "num_documents": len(dokumen),
+                "error": f"{type(e).__name__}: {e}" or repr(e)
+            }
+
+    def _format_documents(self, dokumen: list) -> str:
+        """
+        Format documents as numbered list matching training format.
+
+        Args:
+            dokumen: List of document strings.
+
+        Returns:
+            str: Formatted document string.
+        """
+        docs_text = ""
+        for idx, doc in enumerate(dokumen, 1):
+            docs_text += f"\n\nDokumen {idx}:\n{doc}"
+        return docs_text
+
+    def _split_cot_answer(self, raw_text: str) -> tuple:
+        """
+        Parse <CoT>...</CoT> block from raw output.
+
+        Args:
+            raw_text: Raw model output text.
+
+        Returns:
+            tuple: (analisis, jawaban)
+        """
+        # Try to find CoT block
+        cot_pattern = r'<CoT>(.*?)</CoT>\s*(.*)'
+        match = re.search(cot_pattern, raw_text, re.DOTALL)
+
         if match:
-            return int(match.group(1))
-    return None
+            analisis = match.group(1).strip()
+            jawaban = match.group(2).strip()
+            return (analisis, jawaban)
 
+        # Fallback: split on double newline
+        if '\n\n' in raw_text:
+            parts = raw_text.split('\n\n', 1)
+            analisis = parts[0].strip()
+            jawaban = parts[1].strip() if len(parts) > 1 else ""
+            return (analisis, jawaban)
 
-def _extract_doc_content(dokumen: list, doc_number: int) -> str:
-    """Ekstrak inti konten dari dokumen relevan (1-based index)."""
-    idx = doc_number - 1
-    if idx < 0 or idx >= len(dokumen):
-        return ""
+        # No split possible
+        return ("", raw_text.strip())
 
-    content = dokumen[idx].strip()
-    lines = content.split("\n")
-    body_lines = []
-    skip_header = True
-    for line in lines:
-        stripped = line.strip()
-        if skip_header and (stripped.lower().startswith("pasal") or stripped == ""):
-            continue
-        skip_header = False
-        body_lines.append(stripped)
+    def _enrich_jawaban(self, jawaban: str) -> str:
+        """
+        Clean and enrich the answer by removing document references.
 
-    body = " ".join(body_lines).strip()
-    if len(body) > 300:
-        last_period = body[:300].rfind(".")
-        if last_period > 50:
-            body = body[:last_period + 1]
-        else:
-            body = body[:300].rsplit(" ", 1)[0] + "."
-    return body
+        Args:
+            jawaban: Raw answer text.
 
+        Returns:
+            str: Cleaned answer text.
+        """
+        # Return as-is if too short
+        if len(jawaban) < 10:
+            return jawaban
 
-def _enrich_jawaban(jawaban: str, analisis: str,
-                    dokumen: list) -> str:
-    """
-    Perkaya jawaban jika terlalu singkat atau hanya 'Dokumen X'.
-    Hapus referensi (Dokumen N) dari jawaban.
-    """
-    cleaned = jawaban.strip()
-    has_substance = len(cleaned) > 40 and not re.match(
-        r"^[Dd]okumen\s+\d+", cleaned
-    )
+        # Remove document references (e.g., "Dokumen 1", "lihat Dokumen 2")
+        jawaban = re.sub(
+            r'(?:lihat |mengacu pada |berdasarkan )?Dokumen \d+',
+            '',
+            jawaban,
+            flags=re.IGNORECASE
+        )
 
-    # Strip semua referensi (Dokumen N) dari jawaban
-    cleaned = re.sub(r"\s*\([Dd]okumen\s+\d+\)\s*", " ", cleaned).strip()
-    cleaned = re.sub(r"\s*[Dd]okumen\s+\d+\.?\s*$", "", cleaned).strip()
+        # Clean up multiple spaces
+        jawaban = re.sub(r'  +', ' ', jawaban)
 
-    if has_substance:
-        return cleaned
+        # Clean up multiple newlines
+        jawaban = re.sub(r'\n{3,}', '\n\n', jawaban)
 
-    doc_number = _extract_doc_number(analisis)
-    if doc_number is None:
-        match = re.search(r"[Dd]okumen\s+(\d+)", cleaned)
-        if match:
-            doc_number = int(match.group(1))
+        # Strip leading/trailing whitespace
+        jawaban = jawaban.strip()
 
-    if doc_number is None:
-        return cleaned
+        return jawaban
 
-    doc_content = _extract_doc_content(dokumen, doc_number)
-    if not doc_content:
-        return cleaned
+    def get_model_info(self) -> dict:
+        """
+        Get information about the currently loaded model.
 
-    return doc_content
+        Returns:
+            dict: Model information including GPU memory usage.
+        """
+        if self.model is None:
+            return {
+                "model_path": None,
+                "model_type": None,
+                "loaded": False,
+                "gpu_memory_allocated_gb": 0,
+                "gpu_memory_reserved_gb": 0,
+                "gpu_device_count": 0
+            }
 
+        # Get GPU memory info
+        gpu_allocated = 0
+        gpu_reserved = 0
+        gpu_count = 0
 
+        if torch.cuda.is_available():
+            gpu_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+            gpu_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+            gpu_count = torch.cuda.device_count()
 
-
-def generate_answer_rag(pertanyaan: str, dokumen: list,
-                        max_new_tokens: int = 512,
-                        temperature: float = 0.7, top_p: float = 0.9,
-                        repetition_penalty: float = 1.15) -> dict:
-    """
-    Generate jawaban DENGAN konteks dokumen (RAG / RAFT format).
-    Format prompt HARUS SAMA PERSIS dengan training data RAFT.
-
-    Response dipisah menjadi 2 field:
-    - analisis: Chain-of-Thought (evaluasi relevansi dokumen)
-    - jawaban: Jawaban akhir yang ringkas dan lengkap
-
-    Returns:
-        dict dengan key: analisis, jawaban, raw_response, model_type, model_path, num_documents
-    """
-    _ensure_model_loaded()
-
-    # Format dokumen konteks (SAMA PERSIS dengan training)
-    docs_text = _format_rag_context(dokumen)
-    user_message = f"{pertanyaan}{docs_text}"
-
-    messages = [
-        {"role": "system", "content": RAFT_SYSTEM_PROMPT},
-        {"role": "user", "content": user_message},
-    ]
-
-    input_ids = _tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-    ).to("cuda")
-
-    output_ids = _model.generate(
-        input_ids,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        do_sample=True,
-        top_p=top_p,
-        top_k=50,
-        repetition_penalty=repetition_penalty,
-        min_p=0.05,
-    )
-
-    response = _tokenizer.decode(
-        output_ids[0][input_ids.shape[1]:],
-        skip_special_tokens=True,
-    )
-
-    raw_response = response.strip()
-    analisis, jawaban = _split_cot_answer(raw_response)
-
-    # Perkaya jawaban jika terlalu singkat (cuma "Dokumen X")
-    jawaban = _enrich_jawaban(jawaban, analisis, dokumen)
-
-    return {
-        "analisis": analisis,
-        "jawaban": jawaban,
-        "raw_response": raw_response,
-        "model_type": _model_type,
-        "model_path": _model_path,
-        "num_documents": len(dokumen),
-    }
-
-
-def get_model_info() -> dict:
-    """Info model yang sedang aktif."""
-    return {
-        "loaded": _model is not None,
-        "model_path": _model_path,
-        "model_type": _model_type,
-        "cuda_available": torch.cuda.is_available(),
-        "gpu_count": torch.cuda.device_count(),
-        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-    }
-
-
-def get_error_detail(e: Exception) -> str:
-    """Format error detail untuk logging."""
-    return f"{type(e).__name__}: {str(e) or '(no message)'}\n{traceback.format_exc()}"
+        return {
+            "model_path": self.model_path,
+            "model_type": self.model_type,
+            "loaded": True,
+            "gpu_memory_allocated_gb": round(gpu_allocated, 2),
+            "gpu_memory_reserved_gb": round(gpu_reserved, 2),
+            "gpu_device_count": gpu_count
+        }
