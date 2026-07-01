@@ -1,309 +1,256 @@
-"""
-API Routes for RAFT Inference Service.
-
-Provides endpoints for plain chat, RAG/RAFT chat with documents,
-model management, and health checks.
-"""
-
-import os
+from flask import Blueprint, request, jsonify
+from llama_service import (
+    generate_answer,
+    generate_answer_rag,
+    load_model,
+    get_model_info,
+    get_error_detail,
+    MODEL_PATHS,
+    BASE_MODEL_NAME,
+)
 import logging
-from flask import request, jsonify
-from llama_service import LlamaService
+import os
 
 logger = logging.getLogger(__name__)
 
+bp = Blueprint("routes", __name__)
 
-def register_routes(app):
+
+@bp.route("/api/load-model", methods=["POST"])
+def load_model_endpoint():
     """
-    Register all API routes with the Flask app.
-
-    Args:
-        app: Flask application instance.
+    Endpoint untuk load model secara manual.
+    
+    Body JSON (opsional):
+    {
+        "model_path": "/path/to/model"  // load model tertentu untuk perbandingan
+    }
+    
+    Jika body kosong, akan auto-resolve model pertama yang ditemukan.
     """
-    service = LlamaService.get_instance()
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        model_path = data.get("model_path", None)
+        load_model(model_path)
+        info = get_model_info()
+        return jsonify({
+            "status": "success",
+            "message": "Model berhasil dimuat ke memori.",
+            "model_info": info,
+        }), 200
+    except Exception as e:
+        detail = get_error_detail(e)
+        logger.error(f"Error loading model:\n{detail}")
+        return jsonify({
+            "status": "error",
+            "message": f"Gagal memuat model: {type(e).__name__}: {str(e) or '(no message)'}",
+        }), 500
 
-    # -------------------------------------------------------------------------
-    # POST /api/chat — Plain LLM chat without documents
-    # -------------------------------------------------------------------------
-    @app.route('/api/chat', methods=['POST'])
-    def chat():
-        """Plain chat endpoint without document context."""
-        try:
-            # Check if model is loaded
-            if service.model is None:
-                return jsonify({
-                    "status": "error",
-                    "message": "No model loaded. Use POST /api/load-model first."
-                }), 503
 
-            # Parse request body
-            data = request.get_json()
-            if not data:
-                return jsonify({
-                    "status": "error",
-                    "message": "Request body must be JSON"
-                }), 400
+@bp.route("/api/model-info", methods=["GET"])
+def model_info_endpoint():
+    """Cek info model yang sedang dipakai."""
+    return jsonify(get_model_info()), 200
 
-            # Validate pertanyaan
-            pertanyaan = data.get('pertanyaan')
-            if not pertanyaan or not pertanyaan.strip():
-                return jsonify({
-                    "status": "error",
-                    "message": "Field 'pertanyaan' is required and must be non-empty"
-                }), 400
 
-            # Optional parameters
-            max_tokens = data.get('max_tokens', 512)
-            temperature = data.get('temperature', 0.7)
-            top_p = data.get('top_p', 0.9)
+@bp.route("/api/chat", methods=["POST"])
+def chat():
+    """
+    Generate jawaban TANPA konteks dokumen (plain chat).
 
-            # Generate answer
-            result = service.generate_answer(
-                pertanyaan=pertanyaan.strip(),
-                max_new_tokens=int(max_tokens),
-                temperature=float(temperature),
-                top_p=float(top_p)
-            )
+    Body JSON:
+    {
+        "pertanyaan": "Apa yang dimaksud dengan Desa?",
+        "max_new_tokens": 512,       // opsional, default 512
+        "temperature": 0.1,          // opsional, default 0.1
+        "top_p": 0.9,               // opsional, default 0.9
+        "repetition_penalty": 1.1    // opsional, default 1.1
+    }
 
-            # Check for generation error
-            if 'error' in result:
-                return jsonify({
-                    "status": "error",
-                    "message": result['error']
-                }), 500
+    Contoh Postman:
+    POST http://localhost:6000/api/chat
+    Content-Type: application/json
+    {
+        "pertanyaan": "Apa yang dimaksud dengan Desa menurut Perdes Loa No. 5/2017?"
+    }
+    """
+    try:
+        data = request.get_json(force=True)
+        pertanyaan = data.get("pertanyaan", "").strip()
 
+        if not pertanyaan:
             return jsonify({
-                "status": "success",
-                "pertanyaan": pertanyaan,
-                "jawaban": result['raw_response'],
-                "model_type": result['model_type']
+                "status": "error",
+                "message": "Field 'pertanyaan' wajib diisi.",
+            }), 400
+
+        max_new_tokens = data.get("max_new_tokens", 512)
+        temperature = data.get("temperature", 0.1)
+        top_p = data.get("top_p", 0.9)
+        repetition_penalty = data.get("repetition_penalty", 1.1)
+
+        result = generate_answer(
+            pertanyaan=pertanyaan,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
+
+        return jsonify({
+            "status": "success",
+            "pertanyaan": pertanyaan,
+            "jawaban": result["answer"],
+            "model_type": result["model_type"],
+            "model_path": result["model_path"],
+        }), 200
+
+    except Exception as e:
+        detail = get_error_detail(e)
+        logger.error(f"Error di /api/chat:\n{detail}")
+        return jsonify({
+            "status": "error",
+            "message": f"Gagal generate jawaban: {type(e).__name__}: {str(e) or '(no message)'}",
+        }), 500
+
+
+@bp.route("/api/chat-rag", methods=["POST"])
+def chat_rag():
+    """
+    Generate jawaban DENGAN konteks dokumen (RAG / RAFT format).
+    Model akan menganalisis dokumen yang diberikan dan menjawab berdasarkan
+    dokumen yang paling relevan.
+
+    Body JSON:
+    {
+        "pertanyaan": "Apa rentang usia bayi?",
+        "dokumen": [
+            "pasal 1\n\n15. bayi adalah anak usia 0 bulan sampai dengan 11 bulan 28 hari",
+            "pasal 1\n\n9. pembangunan desa adalah upaya peningkatan kualitas hidup...",
+            "pasal 1\n\n25. pemerintah pusat selanjutnya disebut pemerintah..."
+        ],
+        "max_new_tokens": 512,       // opsional, default 512
+        "temperature": 0.1,          // opsional, default 0.1
+        "top_p": 0.9,               // opsional, default 0.9
+        "repetition_penalty": 1.1    // opsional, default 1.1
+    }
+
+    Contoh Postman:
+    POST http://localhost:6000/api/chat-rag
+    Content-Type: application/json
+    {
+        "pertanyaan": "Apa rentang usia bayi menurut Perdes Biru No. 07/2015?",
+        "dokumen": [
+            "pasal 1\n\n15. bayi adalah anak usia 0 bulan sampai dengan 11 bulan 28 hari",
+            "pasal 1\n\n9. pembangunan desa adalah upaya peningkatan kualitas hidup...",
+            "pasal 1\n\n25. pemerintah pusat selanjutnya disebut pemerintah..."
+        ]
+    }
+    """
+    try:
+        data = request.get_json(force=True)
+        pertanyaan = data.get("pertanyaan", "").strip()
+        dokumen = data.get("dokumen", [])
+
+        if not pertanyaan:
+            return jsonify({
+                "status": "error",
+                "message": "Field 'pertanyaan' wajib diisi.",
+            }), 400
+
+        if not dokumen or not isinstance(dokumen, list):
+            return jsonify({
+                "status": "error",
+                "message": "Field 'dokumen' wajib berupa list string berisi dokumen konteks.",
+            }), 400
+
+        max_new_tokens = data.get("max_new_tokens", 512)
+        temperature = data.get("temperature", 0.7)
+        top_p = data.get("top_p", 0.9)
+        repetition_penalty = data.get("repetition_penalty", 1.15)
+
+        result = generate_answer_rag(
+            pertanyaan=pertanyaan,
+            dokumen=dokumen,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
+
+        return jsonify({
+            "status": "success",
+            "pertanyaan": pertanyaan,
+            "analisis": result["analisis"],
+            "jawaban": result["jawaban"],
+            "raw_response": result["raw_response"],
+            "model_type": result["model_type"],
+            "model_path": result["model_path"],
+            "num_documents": result["num_documents"],
+        }), 200
+
+    except Exception as e:
+        detail = get_error_detail(e)
+        logger.error(f"Error di /api/chat-rag:\n{detail}")
+        return jsonify({
+            "status": "error",
+            "message": f"Gagal generate jawaban RAG: {type(e).__name__}: {str(e) or '(no message)'}",
+        }), 500
+
+
+@bp.route("/api/health", methods=["GET"])
+def health():
+    info = get_model_info()
+    return jsonify({
+        "status": "ok",
+        "message": "API is running",
+        "model_loaded": info["loaded"],
+        "model_info": info,
+        "endpoints": {
+            "chat": "POST /api/chat - Generate without RAG context",
+            "chat_rag": "POST /api/chat-rag - Generate with RAG context",
+            "load_model": "POST /api/load-model - Preload model into memory",
+            "model_info": "GET /api/model-info - Get current model info",
+            "models": "GET /api/models - List available models on server",
+            "health": "GET /api/health - Health check",
+        },
+    }), 200
+
+
+@bp.route("/api/models", methods=["GET"])
+def list_models():
+    """
+    List all models available on the server (fine-tuned + base).
+    Useful to check which models exist before calling /api/load-model.
+    """
+    available = []
+    # Model type labels for comparison
+    model_type_labels = {
+        "model_merged_raft_perdes": "fine-tuned-raft",
+        "model_merged_perdes": "fine-tuned-qa",
+    }
+
+    for path in MODEL_PATHS:
+        resolved = os.path.abspath(path)
+        basename = os.path.basename(resolved)
+        model_type = model_type_labels.get(basename, "fine-tuned")
+        if os.path.isdir(resolved):
+            available.append({
+                "path": resolved,
+                "type": model_type,
+                "exists": True,
             })
 
-        except Exception as e:
-            logger.error(f"Error in /api/chat: {e}")
-            return jsonify({
-                "status": "error",
-                "message": f"Internal server error: {str(e)}"
-            }), 500
+    base_exists = os.path.isdir(BASE_MODEL_NAME)
+    available.append({
+        "path": BASE_MODEL_NAME,
+        "type": "base",
+        "exists": base_exists,
+    })
 
-    # -------------------------------------------------------------------------
-    # POST /api/chat-rag — RAFT chat with document context
-    # -------------------------------------------------------------------------
-    @app.route('/api/chat-rag', methods=['POST'])
-    def chat_rag():
-        """RAG/RAFT chat endpoint with document context."""
-        try:
-            # Check if model is loaded
-            if service.model is None:
-                return jsonify({
-                    "status": "error",
-                    "message": "No model loaded. Use POST /api/load-model first."
-                }), 503
+    current = get_model_info()
 
-            # Parse request body
-            data = request.get_json()
-            if not data:
-                return jsonify({
-                    "status": "error",
-                    "message": "Request body must be JSON"
-                }), 400
-
-            # Validate pertanyaan
-            pertanyaan = data.get('pertanyaan')
-            if not pertanyaan or not pertanyaan.strip():
-                return jsonify({
-                    "status": "error",
-                    "message": "Field 'pertanyaan' is required and must be non-empty"
-                }), 400
-
-            # Validate dokumen
-            dokumen = data.get('dokumen')
-            if not dokumen or not isinstance(dokumen, list) or len(dokumen) == 0:
-                return jsonify({
-                    "status": "error",
-                    "message": "Field 'dokumen' is required and must be a non-empty list"
-                }), 400
-
-            # Optional parameters
-            max_tokens = data.get('max_tokens', 512)
-            temperature = data.get('temperature', 0.7)
-            top_p = data.get('top_p', 0.9)
-
-            # Generate RAG answer
-            result = service.generate_answer_rag(
-                pertanyaan=pertanyaan.strip(),
-                dokumen=dokumen,
-                max_new_tokens=int(max_tokens),
-                temperature=float(temperature),
-                top_p=float(top_p)
-            )
-
-            # Check for generation error
-            if 'error' in result:
-                return jsonify({
-                    "status": "error",
-                    "message": result['error']
-                }), 500
-
-            return jsonify({
-                "status": "success",
-                "pertanyaan": pertanyaan,
-                "analisis": result['analisis'],
-                "jawaban": result['jawaban'],
-                "raw_response": result['raw_response'],
-                "model_type": result['model_type'],
-                "num_documents": result['num_documents']
-            })
-
-        except Exception as e:
-            logger.error(f"Error in /api/chat-rag: {e}")
-            return jsonify({
-                "status": "error",
-                "message": f"Internal server error: {str(e)}"
-            }), 500
-
-    # -------------------------------------------------------------------------
-    # POST /api/load-model — Load or switch model
-    # -------------------------------------------------------------------------
-    @app.route('/api/load-model', methods=['POST'])
-    def load_model():
-        """Load or switch the active model."""
-        try:
-            # Parse request body
-            data = request.get_json()
-            if not data:
-                return jsonify({
-                    "status": "error",
-                    "message": "Request body must be JSON"
-                }), 400
-
-            # Validate model_path
-            model_path = data.get('model_path')
-            if not model_path or not model_path.strip():
-                return jsonify({
-                    "status": "error",
-                    "message": "Field 'model_path' is required"
-                }), 400
-
-            model_path = model_path.strip()
-
-            # Check if path exists
-            if not os.path.exists(model_path):
-                return jsonify({
-                    "status": "error",
-                    "message": f"Model path does not exist: {model_path}"
-                }), 400
-
-            # Load model
-            service.load_model(model_path)
-
-            return jsonify({
-                "status": "success",
-                "model_path": service.model_path,
-                "model_type": service.model_type
-            })
-
-        except RuntimeError as e:
-            logger.error(f"Model loading failed: {e}")
-            return jsonify({
-                "status": "error",
-                "message": str(e)
-            }), 500
-
-        except Exception as e:
-            logger.error(f"Error in /api/load-model: {e}")
-            return jsonify({
-                "status": "error",
-                "message": f"Internal server error: {str(e)}"
-            }), 500
-
-    # -------------------------------------------------------------------------
-    # GET /api/model-info — Info about currently loaded model
-    # -------------------------------------------------------------------------
-    @app.route('/api/model-info', methods=['GET'])
-    def model_info():
-        """Get information about the currently loaded model."""
-        try:
-            info = service.get_model_info()
-            return jsonify(info)
-
-        except Exception as e:
-            logger.error(f"Error in /api/model-info: {e}")
-            return jsonify({
-                "status": "error",
-                "message": f"Internal server error: {str(e)}"
-            }), 500
-
-    # -------------------------------------------------------------------------
-    # GET /api/models — List available models
-    # -------------------------------------------------------------------------
-    @app.route('/api/models', methods=['GET'])
-    def list_models():
-        """List available models in the model directory."""
-        try:
-            # Scan ../model/ directory relative to BE/
-            model_base_dir = os.path.join(os.path.dirname(__file__), '..', 'model')
-            model_base_dir = os.path.abspath(model_base_dir)
-
-            models = []
-
-            if os.path.exists(model_base_dir):
-                for entry in os.listdir(model_base_dir):
-                    model_dir = os.path.join(model_base_dir, entry)
-
-                    # Check if it's a directory with config.json
-                    if os.path.isdir(model_dir):
-                        config_path = os.path.join(model_dir, 'config.json')
-                        if os.path.exists(config_path):
-                            # Determine model type from name
-                            model_type = "raft" if "raft" in entry.lower() else "base"
-                            models.append({
-                                "name": entry,
-                                "path": model_dir,
-                                "type": model_type
-                            })
-
-            return jsonify({
-                "status": "success",
-                "models": models
-            })
-
-        except Exception as e:
-            logger.error(f"Error in /api/models: {e}")
-            return jsonify({
-                "status": "error",
-                "message": f"Internal server error: {str(e)}"
-            }), 500
-
-    # -------------------------------------------------------------------------
-    # GET /api/health — Health check
-    # -------------------------------------------------------------------------
-    @app.route('/api/health', methods=['GET'])
-    def health_check():
-        """Health check endpoint."""
-        try:
-            model_loaded = service.model is not None
-            model_path = service.model_path
-
-            endpoints = [
-                "POST /api/chat",
-                "POST /api/chat-rag",
-                "POST /api/load-model",
-                "GET /api/model-info",
-                "GET /api/models",
-                "GET /api/health"
-            ]
-
-            return jsonify({
-                "status": "ok",
-                "model_loaded": model_loaded,
-                "model_path": model_path,
-                "endpoints": endpoints
-            })
-
-        except Exception as e:
-            logger.error(f"Error in /api/health: {e}")
-            return jsonify({
-                "status": "error",
-                "message": f"Health check failed: {str(e)}"
-            }), 500
+    return jsonify({
+        "models": available,
+        "currently_loaded": current.get("model_path"),
+    }), 200
