@@ -26,16 +26,12 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Konfigurasi Path Model
 # ============================================================================
-BASE_MODEL_NAME = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "model", "Meta-Llama-3.1-8B-Instruct")
-)
 
 # Path model fine-tuned (relatif terhadap file ini)
 _NOTEBOOKS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "notebooks"))
 
 MODEL_PATHS = [
-    os.path.join(_NOTEBOOKS_DIR, "model_merged_raft_perdes_v1"),   # RAFT fine-tuned
-    os.path.join(_NOTEBOOKS_DIR, "model_merged_perdes"),         # Q&A fine-tuned
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model", "model_merged_raft_v2")),
 ]
 
 # ============================================================================
@@ -45,10 +41,10 @@ MODEL_PATHS = [
 # System prompt untuk model RAFT (fine-tuned dengan dokumen konteks)
 # Digunakan di /api/chat-rag
 RAFT_SYSTEM_PROMPT = (
-    "Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang "
-    "Peraturan Desa (Perdes) di Indonesia. Jawab pertanyaan berdasarkan "
-    "dokumen-dokumen yang diberikan. Tidak semua dokumen relevan dengan "
-    "pertanyaan, jadi pilihlah informasi dari dokumen yang paling sesuai."
+    "Anda adalah asisten AI ahli dalam menjawab pertanyaan berdasarkan dokumen hukum dan peraturan desa.\n"
+    "Diberikan sejumlah dokumen referensi, analisislah dokumen tersebut untuk mencari jawaban yang tepat.\n"
+    "Tuliskan proses berpikir Anda di dalam tag <thought>...</thought> dengan menjelaskan dokumen mana yang relevan dan tidak relevan (distraktor).\n"
+    "Setelah itu, berikan jawaban akhir Anda berdasarkan hasil analisis tersebut."
 )
 
 # System prompt untuk model base / Q&A (tanpa dokumen konteks)
@@ -86,7 +82,6 @@ def _resolve_model_path(requested_path: Optional[str] = None) -> str:
     Priority:
       1. requested_path (jika diberikan dan valid)
       2. Model fine-tuned pertama yang ditemukan (MODEL_PATHS)
-      3. Base model (fallback)
     """
     if requested_path:
         abs_path = os.path.abspath(requested_path)
@@ -100,14 +95,9 @@ def _resolve_model_path(requested_path: Optional[str] = None) -> str:
             logger.info(f"Model fine-tuned ditemukan: {path}")
             return path
 
-    # Fallback ke base model
-    if os.path.isdir(BASE_MODEL_NAME):
-        logger.info(f"Menggunakan base model: {BASE_MODEL_NAME}")
-        return BASE_MODEL_NAME
-
     raise FileNotFoundError(
         f"Tidak ada model yang ditemukan! "
-        f"Fine-tuned paths: {MODEL_PATHS}, Base: {BASE_MODEL_NAME}"
+        f"Fine-tuned paths: {MODEL_PATHS}"
     )
 
 
@@ -157,10 +147,11 @@ def _format_rag_context(dokumen: list) -> str:
     Format list dokumen menjadi string konteks RAFT.
     Format harus SAMA PERSIS dengan training data.
     """
-    docs_text = ""
-    for idx, doc in enumerate(dokumen, 1):
-        docs_text += f"\n\nDokumen {idx}:\n{doc}"
-    return docs_text
+    formatted_docs = []
+    for idx, doc in enumerate(dokumen, start=1):
+        doc_text = str(doc).strip() if doc is not None else "[Dokumen kosong]"
+        formatted_docs.append(f'<doc id="{idx}">\n{doc_text}\n</doc>')
+    return "\n\n".join(formatted_docs)
 
 
 def generate_answer(pertanyaan: str, max_new_tokens: int = 512,
@@ -221,26 +212,20 @@ def _split_cot_answer(raw_response: str) -> tuple:
     Model RAFT menghasilkan: {analisis/CoT}\n\n{jawaban}
     Returns: tuple (analisis, jawaban)
     """
-    text = raw_response.strip()
-    separator = "\n\n"
-    last_sep_idx = text.rfind(separator)
-
-    if last_sep_idx == -1:
-        return "", text
-
-    analisis = text[:last_sep_idx].strip()
-    jawaban = text[last_sep_idx + len(separator):].strip()
-
-    # Validasi: kalau jawaban terlalu pendek, coba separator sebelumnya
-    if len(jawaban) < 10:
-        second_last = text.rfind(separator, 0, last_sep_idx)
-        if second_last != -1:
-            kandidat = text[second_last + len(separator):].strip()
-            if len(kandidat) > len(jawaban):
-                analisis = text[:second_last].strip()
-                jawaban = kandidat
-
-    return analisis, jawaban
+    import re
+    thought_match = re.search(r"<thought>(.*?)</thought>", raw_response, re.DOTALL | re.IGNORECASE)
+    
+    if thought_match:
+        analisis = thought_match.group(1).strip()
+        jawaban = raw_response[thought_match.end():].strip()
+        
+        # Bersihkan awalan "Jawaban:" jika ada
+        if jawaban.lower().startswith("jawaban:"):
+            jawaban = jawaban[len("jawaban:"):].strip()
+            
+        return analisis, jawaban
+        
+    return "", raw_response.strip()
 
 
 def _extract_doc_number(analisis: str) -> Optional[int]:
@@ -283,38 +268,7 @@ def _extract_doc_content(dokumen: list, doc_number: int) -> str:
     return body
 
 
-def _enrich_jawaban(jawaban: str, analisis: str,
-                    dokumen: list) -> str:
-    """
-    Perkaya jawaban jika terlalu singkat atau hanya 'Dokumen X'.
-    Hapus referensi (Dokumen N) dari jawaban.
-    """
-    cleaned = jawaban.strip()
-    has_substance = len(cleaned) > 40 and not re.match(
-        r"^[Dd]okumen\s+\d+", cleaned
-    )
 
-    # Strip semua referensi (Dokumen N) dari jawaban
-    cleaned = re.sub(r"\s*\([Dd]okumen\s+\d+\)\s*", " ", cleaned).strip()
-    cleaned = re.sub(r"\s*[Dd]okumen\s+\d+\.?\s*$", "", cleaned).strip()
-
-    if has_substance:
-        return cleaned
-
-    doc_number = _extract_doc_number(analisis)
-    if doc_number is None:
-        match = re.search(r"[Dd]okumen\s+(\d+)", cleaned)
-        if match:
-            doc_number = int(match.group(1))
-
-    if doc_number is None:
-        return cleaned
-
-    doc_content = _extract_doc_content(dokumen, doc_number)
-    if not doc_content:
-        return cleaned
-
-    return doc_content
 
 
 
@@ -322,7 +276,7 @@ def _enrich_jawaban(jawaban: str, analisis: str,
 def generate_answer_rag(pertanyaan: str, dokumen: list,
                         max_new_tokens: int = 512,
                         temperature: float = 0.7, top_p: float = 0.9,
-                        repetition_penalty: float = 1.15) -> dict:
+                        repetition_penalty: float = 1.0) -> dict:
     """
     Generate jawaban DENGAN konteks dokumen (RAG / RAFT format).
     Format prompt HARUS SAMA PERSIS dengan training data RAFT.
@@ -336,9 +290,8 @@ def generate_answer_rag(pertanyaan: str, dokumen: list,
     """
     _ensure_model_loaded()
 
-    # Format dokumen konteks (SAMA PERSIS dengan training)
     docs_text = _format_rag_context(dokumen)
-    user_message = f"{pertanyaan}{docs_text}"
+    user_message = f"Pertanyaan: {pertanyaan}\n\nDokumen Referensi:\n{docs_text}"
 
     messages = [
         {"role": "system", "content": RAFT_SYSTEM_PROMPT},
@@ -370,9 +323,6 @@ def generate_answer_rag(pertanyaan: str, dokumen: list,
 
     raw_response = response.strip()
     analisis, jawaban = _split_cot_answer(raw_response)
-
-    # Perkaya jawaban jika terlalu singkat (cuma "Dokumen X")
-    jawaban = _enrich_jawaban(jawaban, analisis, dokumen)
 
     return {
         "analisis": analisis,

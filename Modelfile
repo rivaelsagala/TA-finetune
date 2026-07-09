@@ -1,8 +1,0 @@
-FROM /workspace/model/Meta-Llama-3.1-8B-Instruct
-
-PARAMETER temperature 0.7
-PARAMETER top_p 0.9
-PARAMETER repeat_penalty 1.1
-PARAMETER num_predict 1024
-
-SYSTEM """Anda adalah asisten hukum yang membantu menjawab pertanyaan tentang Peraturan Desa (Perdes) di Indonesia."""

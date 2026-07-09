@@ -6,7 +6,6 @@ from llama_service import (
     get_model_info,
     get_error_detail,
     MODEL_PATHS,
-    BASE_MODEL_NAME,
 )
 import logging
 import os
@@ -64,7 +63,7 @@ def chat():
         "max_new_tokens": 512,       // opsional, default 512
         "temperature": 0.1,          // opsional, default 0.1
         "top_p": 0.9,               // opsional, default 0.9
-        "repetition_penalty": 1.1    // opsional, default 1.1
+        "repetition_penalty": 1.0    // opsional, default 1.0
     }
 
     Contoh Postman:
@@ -87,7 +86,7 @@ def chat():
         max_new_tokens = data.get("max_new_tokens", 512)
         temperature = data.get("temperature", 0.1)
         top_p = data.get("top_p", 0.9)
-        repetition_penalty = data.get("repetition_penalty", 1.1)
+        repetition_penalty = data.get("repetition_penalty", 1.0)
 
         result = generate_answer(
             pertanyaan=pertanyaan,
@@ -167,7 +166,7 @@ def chat_rag():
         max_new_tokens = data.get("max_new_tokens", 512)
         temperature = data.get("temperature", 0.7)
         top_p = data.get("top_p", 0.9)
-        repetition_penalty = data.get("repetition_penalty", 1.15)
+        repetition_penalty = data.get("repetition_penalty", 1.0)
 
         result = generate_answer_rag(
             pertanyaan=pertanyaan,
@@ -226,6 +225,7 @@ def list_models():
     available = []
     # Model type labels for comparison
     model_type_labels = {
+        "model_merged_raft_perdes_best": "fine-tuned-raft",
         "model_merged_raft_perdes": "fine-tuned-raft",
         "model_merged_perdes": "fine-tuned-qa",
     }
@@ -240,13 +240,6 @@ def list_models():
                 "type": model_type,
                 "exists": True,
             })
-
-    base_exists = os.path.isdir(BASE_MODEL_NAME)
-    available.append({
-        "path": BASE_MODEL_NAME,
-        "type": "base",
-        "exists": base_exists,
-    })
 
     current = get_model_info()
 
