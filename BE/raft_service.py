@@ -1,10 +1,7 @@
 import torch
 from unsloth import FastLanguageModel
 
-# =========================
-# KONFIGURASI
-# =========================
-MODEL_DIR = "/workspace/model/model_merged_raft_v2"   # ganti jika path beda
+MODEL_DIR = "/workspace/model/model_merged_raft_v4"  
 MAX_SEQ_LENGTH = 4096
 DTYPE = None
 LOAD_IN_4BIT = False
@@ -55,7 +52,6 @@ def load_model():
 
     FastLanguageModel.for_inference(model)
 
-    # rapikan warning max_length vs max_new_tokens
     if hasattr(model, "generation_config") and model.generation_config is not None:
         model.generation_config.max_length = None
 
@@ -69,7 +65,7 @@ def format_documents(docs):
     return "\n\n".join(formatted)
 
 
-def generate_answer(question, documents, max_new_tokens=512, system_prompt=None):
+def generate_answer(question, documents, system_prompt=None):
     global model, tokenizer
 
     if model is None or tokenizer is None:
@@ -91,7 +87,6 @@ def generate_answer(question, documents, max_new_tokens=512, system_prompt=None)
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=max_new_tokens,
             do_sample=False,
             temperature=0.0,
             use_cache=True,
@@ -104,5 +99,8 @@ def generate_answer(question, documents, max_new_tokens=512, system_prompt=None)
 
     result_text = decoded[len(prompt_text):].strip()
     result_text = result_text.replace("<|eot_id|>", "").replace("<|end_of_text|>", "").strip()
+
+    if "JAWABAN:" in result_text:
+        result_text = result_text.split("JAWABAN:")[-1].strip()
 
     return result_text

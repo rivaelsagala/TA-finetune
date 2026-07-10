@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from llama_service import load_model, generate_answer
+from raft_service import load_model, generate_answer
 
 bp = Blueprint("routes", __name__)
 
@@ -37,8 +37,7 @@ def chat_rag():
         "dokumen 1 ...",
         "dokumen 2 ...",
         "dokumen 3 ..."
-      ],
-      "max_new_tokens": 512
+      ]
     }
     """
     try:
@@ -46,7 +45,6 @@ def chat_rag():
 
         question = (data.get("question") or "").strip()
         documents = data.get("documents", [])
-        max_new_tokens = int(data.get("max_new_tokens", 512))
 
         if not question:
             return jsonify({
@@ -62,8 +60,7 @@ def chat_rag():
 
         answer = generate_answer(
             question=question,
-            documents=documents,
-            max_new_tokens=max_new_tokens
+            documents=documents
         )
 
         return jsonify({
