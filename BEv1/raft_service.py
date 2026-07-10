@@ -154,9 +154,9 @@ def _format_rag_context(dokumen: list) -> str:
     return "\n\n".join(formatted_docs)
 
 
-def generate_answer(pertanyaan: str, max_new_tokens: int = 512,
+def generate_answer(pertanyaan: str, max_new_tokens: int = 2048,
                     temperature: float = 0.1, top_p: float = 0.9,
-                    repetition_penalty: float = 1.1) -> dict:
+                    repetition_penalty: float = 1.0) -> dict:
     """
     Generate jawaban TANPA konteks dokumen (plain chat).
     Cocok untuk model base atau model Q&A sederhana.
@@ -274,7 +274,7 @@ def _extract_doc_content(dokumen: list, doc_number: int) -> str:
 
 
 def generate_answer_rag(pertanyaan: str, dokumen: list,
-                        max_new_tokens: int = 512,
+                        max_new_tokens: int = 2048,
                         temperature: float = 0.7, top_p: float = 0.9,
                         repetition_penalty: float = 1.0) -> dict:
     """
@@ -324,8 +324,22 @@ def generate_answer_rag(pertanyaan: str, dokumen: list,
     raw_response = response.strip()
     analisis, jawaban = _split_cot_answer(raw_response)
 
+    # Coba parse analisis menjadi dictionary seperti struktur dataset awal
+    import ast
+    parsed_analisis = analisis
+    try:
+        if analisis.strip().startswith("{"):
+            cleaned = analisis.strip()
+            # Perbaiki common model generation errors (misal kurung kurawal ganda)
+            cleaned = cleaned.replace("}},", "},")
+            parsed_analisis = ast.literal_eval(cleaned)
+    except Exception as e:
+        logger.warning(f"Gagal mem-parse analisis menjadi dict: {e}")
+
     return {
-        "analisis": analisis,
+        "analisis": parsed_analisis, # Terstruktur seperti dataset jika berhasil diparse
+        "thought_process": parsed_analisis, # Alias agar mirip dengan dataset
+        "completion": jawaban, # Alias agar mirip dengan dataset
         "jawaban": jawaban,
         "raw_response": raw_response,
         "model_type": _model_type,
