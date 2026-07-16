@@ -1,3 +1,4 @@
+import re
 import torch
 from unsloth import FastLanguageModel
 
@@ -17,10 +18,17 @@ Tugas Anda:
 3. Abaikan dokumen yang tidak relevan, salah pasal/ayat, atau hanya mirip topiknya.
 4. Jika tidak ada dokumen yang valid, katakan bahwa informasi tidak ditemukan pada dokumen yang diberikan.
 5. Jawaban akhir hanya boleh berdasarkan dokumen yang dipilih.
+6. Waspadai dokumen yang formatnya/topiknya mirip dengan yang seharusnya, tetapi isi rincian atau daftarnya (nama, urutan, jumlah poin, dsb.) tidak sama persis dengan yang dimaksud pada pertanyaan. Dokumen semacam ini HARUS dianggap tidak valid dan ditolak, walaupun sepintas terlihat cocok.
 
 Format jawaban HARUS seperti ini:
+
 KONTEKS_DIPILIH: [id dokumen]
 KONTEKS_DITOLAK: [id dokumen]
+
+<thought>
+alasan memilih / menolak dokumen
+</thought>
+
 JAWABAN:
 <jawaban akhir>
 """
@@ -53,7 +61,7 @@ def load_model():
     FastLanguageModel.for_inference(model)
 
     if hasattr(model, "generation_config") and model.generation_config is not None:
-        model.generation_config.max_length = None
+        model.generation_config.max_length = 4096
 
     return model, tokenizer
 
@@ -87,6 +95,7 @@ def generate_answer(question, documents, system_prompt=None):
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
+            max_new_tokens=4096,
             do_sample=False,
             temperature=0.0,
             use_cache=True,
@@ -100,7 +109,33 @@ def generate_answer(question, documents, system_prompt=None):
     result_text = decoded[len(prompt_text):].strip()
     result_text = result_text.replace("<|eot_id|>", "").replace("<|end_of_text|>", "").strip()
 
-    if "JAWABAN:" in result_text:
-        result_text = result_text.split("JAWABAN:")[-1].strip()
+    konteks_dipilih = ""
+    konteks_ditolak = ""
+    thought_process = ""
+    jawaban = result_text
 
-    return result_text
+    # Extract KONTEKS_DIPILIH
+    match_dipilih = re.search(r"KONTEKS_DIPILIH:\s*(.*)", result_text)
+    if match_dipilih:
+        konteks_dipilih = match_dipilih.group(1).strip()
+
+    # Extract KONTEKS_DITOLAK
+    match_ditolak = re.search(r"KONTEKS_DITOLAK:\s*(.*)", result_text)
+    if match_ditolak:
+        konteks_ditolak = match_ditolak.group(1).strip()
+
+    # Extract <thought>
+    match_thought = re.search(r"<thought>(.*?)</thought>", result_text, re.DOTALL)
+    if match_thought:
+        thought_process = match_thought.group(1).strip()
+
+    # Extract JAWABAN
+    if "JAWABAN:" in result_text:
+        jawaban = result_text.split("JAWABAN:")[-1].strip()
+
+    return {
+        "konteks_dipilih": konteks_dipilih,
+        "konteks_ditolak": konteks_ditolak,
+        "thought_process": thought_process,
+        "jawaban": jawaban
+    }

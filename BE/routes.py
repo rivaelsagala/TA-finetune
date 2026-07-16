@@ -58,16 +58,19 @@ def chat_rag():
                 "message": "Field 'documents' wajib berupa list dan tidak boleh kosong."
             }), 400
 
-        answer = generate_answer(
+        result = generate_answer(
             question=question,
             documents=documents
         )
-
+ 
         return jsonify({
             "status": "success",
             "question": question,
             "documents_count": len(documents),
-            "answer": answer
+            "konteks_dipilih": result.get("konteks_dipilih", ""),
+            "konteks_ditolak": result.get("konteks_ditolak", ""),
+            "thought": result.get("thought_process", ""),
+            "answer": result.get("jawaban", "")
         }), 200
 
     except Exception as e:
