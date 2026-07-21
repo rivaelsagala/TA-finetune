@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from raft_service import load_model, generate_answer
+from raft_service import load_model, generate_response
 
 bp = Blueprint("routes", __name__)
 
@@ -28,23 +28,28 @@ def load_model_endpoint():
 
 
 @bp.route("/api/chat-raft", methods=["POST"])
-def chat_rag():
+def chat():
     """
+    Endpoint utama untuk tanya jawab dengan context.
+
     Body JSON:
     {
-      "question": "Sebutkan unsur masyarakat dalam Pasal 12 ayat (2) Perdes Majasetra?",
-      "documents": [
-        "dokumen 1 ...",
-        "dokumen 2 ...",
-        "dokumen 3 ..."
-      ]
+        "question": "BPD itu apa sih, fungsinya buat apa di desa?",
+        "context": "..." | ["...", "..."]   ← opsional
+    }
+
+    Response JSON:
+    {
+        "status": "success",
+        "message": "Jawaban berhasil diproses",
+        "thought": "...",
+        "answer": "..."
     }
     """
     try:
-        data = request.get_json(force=True)
+        data = request.get_json(silent=True) or {}
 
-        question = (data.get("question") or "").strip()
-        documents = data.get("documents", [])
+        question = str(data.get("question") or "").strip()
 
         if not question:
             return jsonify({
@@ -52,26 +57,24 @@ def chat_rag():
                 "message": "Field 'question' wajib diisi."
             }), 400
 
-        if not isinstance(documents, list) or len(documents) == 0:
-            return jsonify({
-                "status": "error",
-                "message": "Field 'documents' wajib berupa list dan tidak boleh kosong."
-            }), 400
+        # context/documents bisa berupa string atau list (opsional)
+        context = data.get("context")
+        documents = data.get("documents")
 
-        result = generate_answer(
-            question=question,
-            documents=documents
-        )
- 
+        result = generate_response(question=question, context=context, documents=documents)
+
         return jsonify({
             "status": "success",
-            "question": question,
-            "documents_count": len(documents),
-            "konteks_dipilih": result.get("konteks_dipilih", ""),
-            "konteks_ditolak": result.get("konteks_ditolak", ""),
-            "thought": result.get("thought_process", ""),
-            "answer": result.get("jawaban", "")
+            "message": "Jawaban berhasil diproses",
+            "thought": result["thought"],
+            "answer": result["answer"],
         }), 200
+
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 400
 
     except Exception as e:
         return jsonify({

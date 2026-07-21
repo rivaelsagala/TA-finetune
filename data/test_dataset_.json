@@ -1,0 +1,330 @@
+[
+  {
+    "message": "Sebutkan semua unsur masyarakat yang terdiri dari tokoh dan perwakilan kelompok sebagaimana diatur dalam Pasal 12 ayat (2) Peraturan Desa Majasetra?",
+    "session_id": 1,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Unsur masyarakat yang terdiri dari tokoh dan perwakilan kelompok sebagaimana diatur dalam Pasal 12 ayat (2) Peraturan Desa Majasetra adalah: a. tokoh agama; b. tokoh seni dan budaya; c. tokoh masyarakat dan pemuda; d. tokoh pendidik; e. perwakilan kelompok tani; f. perwakilan kelompok perajin; g. perwakilan kelompok perempuan; h. perwakilan kelompok pemerhati dan perlindungan anak; dan i. perwakilan kelompok masyarakat miskin."
+  },
+  {
+    "message": "Berapa kali pelaporan penyelenggaraan pemberdayaan perempuan dan perlindungan anak menurut Pasal 9 Peraturan Desa Biru No. 10 Tahun 2016?",
+    "session_id": 2,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Pelaporan penyelenggaraan pemberdayaan perempuan dan perlindungan anak sebagaimana diatur dalam Peraturan Desa Biru No. 10 Tahun 2016 dilakukan 1 (satu) kali dalam setahun sebagai bagian dari laporan penyelenggaraan pemerintah desa."
+  },
+  {
+    "message": "BPD itu apa sih, fungsinya buat apa di desa?",
+    "session_id": 3,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "BPD, atau Badan Permusyawaratan Desa, adalah lembaga yang melaksanakan fungsi pemerintahan di desa. Anggotanya merupakan wakil dari penduduk desa yang ditetapkan secara demokratis. Fungsinya meliputi menampung dan menyalurkan aspirasi masyarakat serta melakukan pengawasan terhadap penyelenggaraan pemerintah desa."
+  },
+  {
+    "message": "Apa yang dimaksud dengan Badan Permusyawaratan Desa (BPD) menurut Peraturan Desa Cigentur Kecamatan Paseh Kabupaten Bandung No. 8 Tahun 2018?",
+    "session_id": 4,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Badan Permusyawaratan Desa (BPD) menurut Peraturan Desa Cigentur Kecamatan Paseh Kabupaten Bandung No. 8 Tahun 2018 adalah lembaga yang merupakan perwujudan demokrasi dalam penyelenggaraan pemerintahan desa sebagai unsur penyelenggara pemerintahan desa. BPD berkedudukan sebagai lembaga yang melaksanakan fungsi pemerintahan desa dengan anggota yang merupakan wakil dari penduduk desa berdasarkan keterwakilan wilayah dan ditetapkan secara demokratis."
+  },
+  {
+    "message": "Apa saja fungsi Badan Permusyawaratan Desa (BPD) di Desa Cigentur menurut Peraturan Desa Cigentur Kecamatan Paseh Kabupaten Bandung No. 8 Tahun 2018, Pasal 3?",
+    "session_id": 5,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan dokumen yang tersedia, pertanyaan tidak dapat dijawab karena isi Pasal 3 yang menjelaskan fungsi Badan Permusyawaratan Desa (BPD) tidak terdapat dalam konteks yang diberikan. Dokumen hanya memuat Pasal 1 (definisi BPD), Pasal 2 (kedudukan BPD), dan Pasal 4 (wewenang BPD). Oleh karena itu, informasi mengenai fungsi BPD menurut Pasal 3 tidak tersedia."
+  },
+  {
+    "message": "Berdasarkan Pasal 4 Peraturan Desa Cigentur Nomor 8 Tahun 2018 tentang Badan Permusyawaratan Desa (BPD), apa saja wewenang Badan Permusyawaratan Desa (BPD) Desa Cigentur?",
+    "session_id": 6,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 4 Peraturan Desa Cigentur Nomor 8 Tahun 2018, Badan Permusyawaratan Desa (BPD) mempunyai wewenang: (1) membahas dan menyepakati rancangan Peraturan Desa bersama Kepala Desa; (2) melaksanakan pengawasan terhadap pelaksanaan Peraturan Desa dan Peraturan Kepala Desa; (3) membentuk panitia pemilihan Kepala Desa; (4) menggali, menampung, menghimpun, merumuskan, dan menyalurkan aspirasi masyarakat; dan (5) menyusun tata tertib BPD."
+  },
+  {
+    "message": "Apa yang dimaksud dengan badan permusyawaratan desa Cigentur menurut Pasal 1 Peraturan Desa Cigentur No. 02 Tahun 2018?",
+    "session_id": 9,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Badan Permusyawaratan Desa Cigentur adalah lembaga yang melaksanakan fungsi pemerintahan yang anggotanya merupakan wakil dari penduduk Desa Cigentur berdasarkan keterwakilan wilayah dan ditetapkan secara demokratis."
+  },
+  {
+    "message": "Gimana sih cara pemilihan kewenangan desa di sini? Harus ada acara musyawarah gitu, ya?",
+    "session_id": 10,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Ya. Berdasarkan Pasal 12 ayat (1) Peraturan Desa Majasetra No. 1 Tahun 2018, pemilihan kewenangan Desa Majasetra dilakukan dalam forum musyawarah desa yang diselenggarakan oleh BPD dan dihadiri oleh pemerintah desa, lembaga kemasyarakatan desa, serta unsur masyarakat."
+  },
+  {
+    "message": "Apa saja unsur masyarakat yang dimaksud dalam Pasal 12 ayat (2) Peraturan Desa Cigentur No. 02 Tahun 2018?",
+    "session_id": 11,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Unsur masyarakat yang dimaksud dalam Pasal 12 ayat (2) Peraturan Desa Cigentur No. 02 Tahun 2018 terdiri dari: a. tokoh agama; b. tokoh masyarakat; c. tokoh pendidik; d. perwakilan kelompok tani; e. perwakilan kelompok perajin; f. perwakilan kelompok perempuan; g. perwakilan kelompok pemerhati dan perlindungan anak; dan h. perwakilan kelompok masyarakat miskin."
+  },
+  {
+    "message": "Apa definisi pungutan desa menurut Peraturan Desa Cikadut No. 03 Tahun 2017, Pasal 1?",
+    "session_id": 12,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Pungutan desa adalah pembayaran kepada pemerintah desa atas pelayanan yang diberikan oleh pemerintah desa atau pemanfaatan kekayaan desa oleh masyarakat."
+  },
+  {
+    "message": "Siapa aja sih yang harus bayar pungutan desa?",
+    "session_id": 13,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Yang wajib membayar pungutan desa adalah setiap orang atau badan/lembaga yang memperoleh pelayanan atau fasilitas dari pemerintah desa. Apabila pelayanan diberikan kepada badan atau lembaga, maka yang diwajibkan membayar pungutan desa adalah pimpinan badan atau lembaga yang bersangkutan."
+  },
+  {
+    "message": "Kalau lembaga mau minta pelayanan dari desa, siapa yang harus bayar pungutannya?",
+    "session_id": 14,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Apabila pelayanan diberikan kepada badan atau lembaga, maka yang diwajibkan membayar pungutan desa adalah pimpinan badan atau lembaga yang bersangkutan."
+  },
+  {
+    "message": "Berapa besaran iuran partisipasi perumah/kepala keluarga yang dikenakan bagi warga komplek menurut Peraturan Desa Cikadut No. 03 Tahun 2017, Pasal 3?",
+    "session_id": 15,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Besaran iuran partisipasi perumah atau kepala keluarga yang dikenakan bagi warga komplek adalah sebesar Rp. 30.000 per kepala keluarga sebagai pendapatan asli desa."
+  },
+  {
+    "message": "Apa syarat yang harus dipenuhi agar warga masyarakat desa dapat menerima pengurangan atau pembebasan pungutan desa menurut Peraturan Desa Cikadut No. 03 Tahun 2017?",
+    "session_id": 16,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Warga masyarakat desa dapat menerima pengurangan atau pembebasan pungutan desa apabila termasuk dalam daftar keluarga miskin dan mengajukan permohonan. Pemberian pengurangan atau pembebasan tersebut disesuaikan dengan kemampuan keuangan desa."
+  },
+  {
+    "message": "Apa yang menjadi dasar pemberian pengurangan atau pembebasan pungutan desa menurut Peraturan Desa Cikadut No. 03 Tahun 2017, Pasal 7 ayat (2)?",
+    "session_id": 17,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Dasar pemberian pengurangan atau pembebasan pungutan desa adalah berdasarkan permohonan dari masyarakat dan disesuaikan dengan kemampuan keuangan desa."
+  },
+  {
+    "message": "Apa yang dimaksud dengan badan permusyawaratan desa (BPD) menurut Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018?",
+    "session_id": 18,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Badan Permusyawaratan Desa (BPD) adalah lembaga yang terdiri dari pemuka-pemuka masyarakat yang ada di desa, menampung dan menyalurkan aspirasi masyarakat serta melakukan pengawasan terhadap penyelenggaraan pemerintah desa."
+  },
+  {
+    "message": "Apa sih yang termasuk dalam sarana air bersih di desa kita?",
+    "session_id": 19,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Sarana air bersih meliputi bangunan dan atau peralatan fasilitas air bersih, yaitu bak penampung, bak penyalur, bak penyaring, pipa saluran air, pal, dan mata kran air bersih."
+  },
+  {
+    "message": "Apa yang dimaksud dengan pengerusakan sarana air bersih menurut Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018 Pasal 1?",
+    "session_id": 20,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Pengerusakan sarana air bersih adalah tindakan-tindakan yang mengakibatkan kerusakan sarana air bersih, baik disengaja maupun tidak disengaja."
+  },
+  {
+    "message": "Gimana sih cara milih orang-orang yang jadi pengelola air bersih di desa?",
+    "session_id": 21,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Orang-orang yang menjadi pengelola air bersih (BPSPAM) dipilih dan diangkat melalui musyawarah desa. Setelah dipilih, pengurus BPSPAM ditetapkan dengan keputusan kepala desa."
+  },
+  {
+    "message": "Menurut Pasal 4 ayat (1) Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018, apa kewajiban setiap keluarga pengguna sarana air bersih desa?",
+    "session_id": 22,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Menurut Pasal 4 ayat (1), setiap keluarga pengguna sarana air bersih desa diwajibkan untuk membayar iuran setiap bulan."
+  },
+  {
+    "message": "Bagaimana besarnya iuran ditentukan menurut Pasal 4 ayat (2) Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018?",
+    "session_id": 23,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Menurut Pasal 4 ayat (2), besarnya iuran ditentukan melalui musyawarah pengelola air bersih dan kemudian ditetapkan dengan keputusan kepala desa."
+  },
+  {
+    "message": "Apa yang dimaksud dengan keterlambatan pembayaran iuran menurut Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018 Pasal 4 ayat (3)?",
+    "session_id": 24,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Menurut Pasal 4 ayat (3), keterlambatan pembayaran iuran adalah pembayaran yang dilakukan setelah melewati masa pembayaran yang ditentukan, yaitu minggu pertama setiap bulan berjalan. Atas keterlambatan tersebut dikenakan denda sebesar 25% dari besar iuran setiap bulan berjalan."
+  },
+  {
+    "message": "Apa yang harus dilakukan masyarakat yang membutuhkan air dalam jumlah banyak menurut Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018 Pasal 4 ayat (5)?",
+    "session_id": 25,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Menurut Pasal 4 ayat (5), masyarakat yang membutuhkan air dalam jumlah banyak untuk keperluan kegiatan tertentu wajib melapor kepada Unit Pengelola Air Bersih dan memperoleh izin dari Unit Pengelola."
+  },
+  {
+    "message": "Apa saja langkah-langkah yang harus dilakukan oleh BPSPAM dalam pengelolaan sarana air bersih sesuai Pasal 11 Peraturan Desa Cipedes No. 03 Tahun 2018?",
+    "session_id": 27,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 11 ayat (4) Peraturan Desa Cipedes No. 03 Tahun 2018, BPSPAM wajib melakukan pengelolaan sarana air bersih, melakukan pengawasan dan monitoring terhadap pemakaian air bersih oleh masyarakat, melakukan perbaikan terhadap kerusakan sarana air bersih yang ada, melakukan pembersihan sarana air bersih, serta melakukan pengembangan fasilitas sarana air bersih yang lebih memadai."
+  },
+  {
+    "message": "Setiap tahun, unit pengelola air bersih itu harus ngasih laporan ke pemerintah desa, ya? Gimana caranya?",
+    "session_id": 28,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 11 ayat (5) Peraturan Desa Cipedes No. 03 Tahun 2018, unit pengelola air bersih wajib memberikan laporan mengenai kegiatan dan keuangan kepada pemerintah desa satu kali setiap tahun. Laporan tersebut disampaikan dalam dua bentuk, yaitu secara tertulis maupun secara lisan."
+  },
+  {
+    "message": "Apa yang akan dilakukan terhadap hal-hal yang belum diatur dalam Peraturan Desa Cipedes No. 03 Tahun 2018 mengenai pelaksanaan pengelolaan air bersih?",
+    "session_id": 29,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 12 ayat (1) Peraturan Desa Cipedes No. 03 Tahun 2018, hal-hal yang belum diatur dalam peraturan desa mengenai pelaksanaan pengelolaan air bersih di Desa Cipedes akan diatur lebih lanjut melalui musyawarah desa."
+  },
+  {
+    "message": "Peraturan tentang pengelolaan air bersih ini mulai berlaku kapan sih?",
+    "session_id": 30,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 12 ayat (2) Peraturan Desa Cipedes No. 03 Tahun 2018, peraturan tentang pengelolaan air bersih mulai berlaku sejak tanggal diundangkan."
+  },
+  {
+    "message": "Apa saja fungsi Badan Permusyawaratan Desa (BPD) menurut Peraturan Desa Cipedes No. 04 Tahun 2018?",
+    "session_id": 31,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 3 Peraturan Desa Cipedes No. 04 Tahun 2018, Badan Permusyawaratan Desa (BPD) mempunyai fungsi membahas dan menyepakati rancangan peraturan desa bersama kepala desa, menampung dan menyalurkan aspirasi masyarakat desa, serta melakukan pengawasan terhadap kinerja kepala desa."
+  },
+  {
+    "message": "Apa saja wewenang Badan Permusyawaratan Desa (BPD) menurut Peraturan Desa Cipedes No. 04 Tahun 2018, Pasal 4?",
+    "session_id": 32,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 4 Peraturan Desa Cipedes No. 04 Tahun 2018, Badan Permusyawaratan Desa (BPD) mempunyai wewenang membahas dan menyepakati rancangan peraturan desa bersama kepala desa, melaksanakan pengawasan terhadap pelaksanaan peraturan desa, peraturan bersama kepala desa, dan peraturan kepala desa, membentuk panitia pemilihan kepala desa, menggali, menampung, menghimpun, merumuskan, dan menyalurkan aspirasi masyarakat, serta menyusun tata tertib."
+  },
+  {
+    "message": "Apa yang dimaksud dengan badan permusyawaratan desa (BPD) menurut Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018 Pasal 1?",
+    "session_id": 34,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 1 angka 3 Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018, Badan Permusyawaratan Desa (BPD) adalah lembaga yang terdiri dari pemuka-pemuka masyarakat yang ada di desa, menampung dan menyalurkan aspirasi masyarakat, serta melakukan pengawasan terhadap penyelenggaraan pemerintah desa."
+  },
+  {
+    "message": "Apa sih yang dimaksud dengan sarana air bersih?",
+    "session_id": 35,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 1 angka 5 Peraturan Desa Cipedes No. 03 Tahun 2018, sarana air bersih adalah bangunan dan atau peralatan fasilitas air bersih yang meliputi bak penampung, bak penyalur, bak penyaring, pipa saluran air, pal, dan mata kran air bersih."
+  },
+  {
+    "message": "Apa syarat yang harus dipenuhi untuk membentuk unit pengelola air bersih (BPSPAM) menurut Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018, Pasal 1?",
+    "session_id": 36,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 1 angka 7 Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018, Unit Pengelola Air Bersih (BPSPAM) merupakan tim kerja yang terdiri dari orang-orang yang dipilih dan diangkat melalui musyawarah desa untuk melakukan pengelolaan terhadap pemanfaatan sarana air bersih."
+  },
+  {
+    "message": "Apa konsekuensi bagi keluarga pengguna sarana air bersih desa jika mereka tidak membayar iuran setiap bulan sesuai dengan Peraturan Desa Cipedes No. 03 Tahun 2018, Pasal 4?",
+    "session_id": 37,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 4 dan Pasal 10 Peraturan Desa Cipedes No. 03 Tahun 2018, setiap keluarga pengguna sarana air bersih wajib membayar iuran setiap bulan. Apabila kewajiban tersebut tidak dipenuhi, dapat dikenakan sanksi berupa peringatan dan sanksi administrasi dari pengurus BPSPAM dan pemerintah desa. Selain itu, apabila pembayaran terlambat melewati minggu pertama setiap bulan berjalan, dikenakan denda sebesar 25% dari besarnya iuran bulan berjalan, kecuali bagi keluarga yang tidak memperoleh distribusi air bersih berdasarkan penilaian unit pengelola."
+  },
+  {
+    "message": "Apa yang dimaksud dengan \"keterlambatan pembayaran iuran\" dalam Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018, Pasal 4?",
+    "session_id": 38,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 4 ayat (3) Peraturan Desa Cipedes Kecamatan Paseh Kabupaten Bandung No. 03 Tahun 2018, keterlambatan pembayaran iuran adalah pembayaran yang dilakukan setelah melewati masa pembayaran yang ditentukan, yaitu setelah minggu pertama setiap bulan berjalan. Atas keterlambatan tersebut dikenakan denda sebesar 25% dari besarnya iuran bulan berjalan."
+  },
+  {
+    "message": "Apa kewajiban masyarakat terkait pemeliharaan sarana air bersih menurut Peraturan Desa Cipedes No. 03 Tahun 2018, Pasal 4?",
+    "session_id": 39,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 4 ayat (4) Peraturan Desa Cipedes No. 03 Tahun 2018, masyarakat wajib melakukan pemeliharaan dan perawatan terhadap sarana air bersih serta wajib melaporkan setiap tindakan pengerusakan yang dilakukan oleh oknum-oknum tertentu yang tidak bertanggung jawab."
+  },
+  {
+    "message": "Apa yang harus dilakukan masyarakat yang membutuhkan air dalam jumlah banyak untuk keperluan kegiatan tertentu menurut Pasal 4 Peraturan Desa Cipedes No. 03 Tahun 2018?",
+    "session_id": 40,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Masyarakat yang membutuhkan air dalam jumlah banyak untuk keperluan kegiatan tertentu harus melapor kepada unit pengelola air bersih dan mendapatkan izin dari unit pengelola."
+  },
+  {
+    "message": "Kalau ada kegiatan sosial di desa, seperti bantu orang sakit atau urus jenazah, itu biayanya dari mana ya?",
+    "session_id": 41,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Berdasarkan Pasal 8 Peraturan Desa Cipedes No. 03 Tahun 2018, dana sosial digunakan untuk mendukung berbagai kegiatan sosial, antara lain membantu kegiatan penimbangan balita di Posyandu, pengadaan sarana kebutuhan jenazah atau kematian, meringankan biaya rumah sakit bagi masyarakat yang tidak mampu, serta memberikan tambahan insentif kepada RT/RW sesuai ketentuan yang berlaku."
+  },
+  {
+    "message": "Apa yang akan dilakukan untuk hal-hal yang belum diatur dalam Peraturan Desa Cipedes No. 03 Tahun 2018, Pasal 12, mengenai pelaksanaan pengelolaan air bersih di Desa Cipedes?",
+    "session_id": 42,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Untuk hal-hal yang belum diatur dalam Peraturan Desa Cipedes No. 03 Tahun 2018, Pasal 12, mengenai pelaksanaan pengelolaan air bersih di Desa Cipedes, akan diatur lebih lanjut melalui musyawarah desa."
+  },
+  {
+    "message": "Apa saja jenis pihak ketiga yang disebutkan dalam Pasal 8 Peraturan Desa Majasetra No. 1 Tahun 2018?",
+    "session_id": 44,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Jenis pihak ketiga yang disebutkan dalam Pasal 8 Peraturan Desa Majasetra No. 1 Tahun 2018 adalah: 1. individu; 2. organisasi kemasyarakatan; 3. perguruan tinggi; 4. lembaga swadaya masyarakat; 5. lembaga donor; dan 6. perusahaan."
+  },
+  {
+    "message": "Siapa yang menyelenggarakan forum musyawarah desa untuk pemilihan kewenangan Desa Majasetra sebagaimana dimaksud pada Pasal 12 ayat (1) Peraturan Desa Majasetra No. 1 Tahun 2018?",
+    "session_id": 45,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Forum musyawarah desa untuk pemilihan kewenangan Desa Majasetra diselenggarakan oleh Badan Permusyawaratan Desa (BPD)."
+  },
+  {
+    "message": "Apa yang diatur dalam Pasal 12 ayat (3) Peraturan Desa Majasetra No. 1 Tahun 2018 mengenai unsur masyarakat yang dapat dilibatkan dalam musyawarah desa?",
+    "session_id": 47,
+    "user_id": 1,
+    "model_id": 1,
+    "evaluate": false,
+    "ground_truth": "Dalam Pasal 12 ayat (3) Peraturan Desa Majasetra No. 1 Tahun 2018, diatur bahwa musyawarah desa dapat melibatkan unsur masyarakat lain sesuai dengan kondisi sosial budaya masyarakat."
+  }
+]
